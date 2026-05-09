@@ -1,0 +1,114 @@
+@import url("https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap");
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ─── OKLCH Forensic Light Theme ────────────────────────────────────────── */
+:root {
+	/* Backgrounds */
+	--bg: oklch(94% 0.005 255);
+	--surface-1: oklch(99% 0.002 255);
+	--surface-2: oklch(91% 0.006 255);
+	--surface-3: oklch(86% 0.009 255);
+
+	/* Borders */
+	--border: oklch(82% 0.01 255);
+	--border-strong: oklch(68% 0.014 255);
+
+	/* Amber — primary accent (darkened so it reads on light bg) */
+	--amber: oklch(52% 0.19 62);
+	--amber-dim: oklch(44% 0.15 62);
+	--amber-bg: oklch(94% 0.03 65);
+
+	/* Crimson — CRITICAL risk */
+	--crimson: oklch(44% 0.21 25);
+	--crimson-bg: oklch(96% 0.025 25);
+
+	/* Sage — LOW / resolved */
+	--sage: oklch(38% 0.11 162);
+	--sage-bg: oklch(94% 0.022 162);
+
+	/* Sky — MEDIUM / info */
+	--sky: oklch(42% 0.13 234);
+	--sky-bg: oklch(93% 0.03 234);
+
+	/* Text */
+	--data: oklch(13% 0.007 255);
+	--muted: oklch(40% 0.008 255);
+	--dim: oklch(58% 0.006 255);
+
+	/* ── Aliases used by inline styles in components ── */
+	--text-data: var(--data);
+	--text-muted: var(--muted);
+	--text-dim: var(--dim);
+	--bg-surface-1: var(--surface-1);
+	--bg-surface-2: var(--surface-2);
+	--bg-surface-3: var(--surface-3);
+	--critical: var(--crimson);
+	--critical-bg: var(--crimson-bg);
+	--high: var(--amber);
+}
+
+/* ─── Base Reset ─────────────────────────────────────────────────────────── */
+@layer base {
+	*,
+	*::before,
+	*::after {
+		box-sizing: border-box;
+	}
+
+	html {
+		-webkit-font-smoothing: antialiased;
+		-moz-osx-font-smoothing: grayscale;
+		text-rendering: optimizeLegibility;
+	}
+
+	body {
+		background-color: var(--bg);
+		color: var(--data);
+		font-family: "Inter", sans-serif;
+		min-height: 100dvh;
+		margin: 0;
+		padding: 0;
+	}
+
+	/* Inputs and selects inherit theme */
+	input,
+	select,
+	textarea {
+		color: var(--data);
+		background-color: var(--surface-1);
+	}
+	input::placeholder,
+	textarea::placeholder {
+		color: var(--dim);
+	}
+
+	/* Scrollbar */
+	::-webkit-scrollbar {
+		width: 6px;
+		height: 6px;
+	}
+	::-webkit-scrollbar-track {
+		background: var(--surface-2);
+	}
+	::-webkit-scrollbar-thumb {
+		background: var(--border-strong);
+		border-radius: 3px;
+	}
+	::-webkit-scrollbar-thumb:hover {
+		background: var(--amber);
+	}
+	* {
+		scrollbar-width: thin;
+		scrollbar-color: var(--border-strong) var(--surface-2);
+	}
+}
+
+/* ─── Utility ────────────────────────────────────────────────────────────── */
+@layer utilities {
+	.font-data {
+		font-family: "JetBrains Mono", monospace;
+	}
+}

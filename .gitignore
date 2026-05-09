@@ -1,0 +1,5 @@
+node_modules/
+.next/
+data/
+*.tar.gz
+.env.local
