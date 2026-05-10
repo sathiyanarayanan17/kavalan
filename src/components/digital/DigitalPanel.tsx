@@ -19,6 +19,7 @@ import { ConfidenceBar } from "@/components/ui/ConfidenceBar";
 interface DigitalPanelProps {
 	caseId: string;
 	digitalEvidence: DigitalEvidence[];
+	onRefresh?: () => void;
 }
 
 interface CorrelationResult {
@@ -30,6 +31,8 @@ interface CorrelationResult {
 	}[];
 	patterns: { label: string; confidence: number }[];
 	digitalRisk: number;
+	summary?: string;
+	eventCount?: number;
 }
 
 function SourceIcon({ type }: { type: DigitalSourceType }) {
@@ -91,11 +94,161 @@ function groupByDay(
 		.map(([date, items]) => ({ date, items }));
 }
 
-export function DigitalPanel({ caseId, digitalEvidence }: DigitalPanelProps) {
+export function DigitalPanel({ caseId, digitalEvidence, onRefresh }: DigitalPanelProps) {
 	const [correlating, setCorrelating] = useState(false);
 	const [correlationError, setCorrelationError] = useState<string | null>(null);
 	const [correlationResult, setCorrelationResult] =
 		useState<CorrelationResult | null>(null);
+
+	// ─── Add-evidence form state ──────────────────────────────────────────────
+	const [mode, setMode] = useState<"none" | "single" | "csv" | "image">("none");
+	const [adding, setAdding] = useState(false);
+	const [addError, setAddError] = useState<string | null>(null);
+	const [addStatus, setAddStatus] = useState<string | null>(null);
+	const [form, setForm] = useState({
+		sourceType: "CCTV" as DigitalSourceType,
+		sourceName: "",
+		timestamp: "",
+		location: "",
+		subject: "",
+		description: "",
+		confidence: "0.75",
+		tags: "",
+	});
+	const [csv, setCsv] = useState("");
+	const [imageFile, setImageFile] = useState<File | null>(null);
+	const [imageHint, setImageHint] = useState("");
+
+	const CSV_TEMPLATE =
+		"sourceType,sourceName,timestamp,location,subject,description,confidence,tags\n" +
+		"CCTV,Main Gate Cam,2026-05-09T21:14:00Z,Main Gate,Unknown Male,Subject loiters near entrance for 4 min,0.82,loitering;unidentified\n" +
+		"MOBILE,Victim iPhone,2026-05-09T22:05:00Z,14 Rosewood Ave,Eleanor Voss,Last outgoing call before incident,0.9,last-contact";
+
+	async function submitSingle() {
+		if (!form.sourceName.trim() || !form.timestamp.trim()) {
+			setAddError("sourceName and timestamp are required.");
+			return;
+		}
+		setAdding(true);
+		setAddError(null);
+		setAddStatus(null);
+		try {
+			// datetime-local → ISO with timezone
+			const iso = new Date(form.timestamp).toISOString();
+			const res = await fetch(`/api/cases/${caseId}/digital`, {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({
+					...form,
+					timestamp: iso,
+					confidence: parseFloat(form.confidence) || 0.5,
+				}),
+			});
+			const data = await res.json().catch(() => ({}));
+			if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`);
+			setAddStatus(`Added ${data.inserted} record.`);
+			setForm({
+				sourceType: "CCTV",
+				sourceName: "",
+				timestamp: "",
+				location: "",
+				subject: "",
+				description: "",
+				confidence: "0.75",
+				tags: "",
+			});
+			onRefresh?.();
+		} catch (err) {
+			setAddError(err instanceof Error ? err.message : "Unknown error");
+		} finally {
+			setAdding(false);
+		}
+	}
+
+	async function submitCsv() {
+		if (!csv.trim()) {
+			setAddError("Paste CSV content first.");
+			return;
+		}
+		setAdding(true);
+		setAddError(null);
+		setAddStatus(null);
+		try {
+			const res = await fetch(`/api/cases/${caseId}/digital`, {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({ csv }),
+			});
+			const data = await res.json().catch(() => ({}));
+			if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`);
+			setAddStatus(
+				`Inserted ${data.inserted} record(s)` +
+					(data.rejected?.length ? `, rejected ${data.rejected.length}.` : "."),
+			);
+			setCsv("");
+			onRefresh?.();
+		} catch (err) {
+			setAddError(err instanceof Error ? err.message : "Unknown error");
+		} finally {
+			setAdding(false);
+		}
+	}
+
+	async function handleCsvFile(e: React.ChangeEvent<HTMLInputElement>) {
+		const f = e.target.files?.[0];
+		if (!f) return;
+		try {
+			const text = await f.text();
+			setCsv(text);
+			setAddStatus(`Loaded ${f.name} (${Math.round(f.size / 1024)} KB). Click Import.`);
+			setAddError(null);
+		} catch (err) {
+			setAddError(err instanceof Error ? err.message : "Could not read file");
+		} finally {
+			e.target.value = "";
+		}
+	}
+
+	async function submitImage() {
+		if (!imageFile) {
+			setAddError("Choose an image file first.");
+			return;
+		}
+		setAdding(true);
+		setAddError(null);
+		setAddStatus(null);
+		try {
+			const fd = new FormData();
+			fd.append("image", imageFile);
+			if (imageHint) fd.append("hint", imageHint);
+
+			const res = await fetch(`/api/cases/${caseId}/digital/extract-image`, {
+				method: "POST",
+				body: fd,
+			});
+			const data = await res.json().catch(() => ({}));
+			if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`);
+			if (data.inserted > 0) {
+				setAddStatus(
+					`Extracted ${data.extracted}, inserted ${data.inserted}.` +
+						(data.summary ? ` ${data.summary}` : ""),
+				);
+				onRefresh?.();
+			} else {
+				setAddError(
+					data.summary
+						? `No events extracted. Reason: ${data.summary}`
+						: "No events could be extracted from this image.",
+				);
+			}
+			setImageFile(null);
+			setImageHint("");
+		} catch (err) {
+			setAddError(err instanceof Error ? err.message : "Unknown error");
+		} finally {
+			setAdding(false);
+		}
+	}
 
 	const sortedEvidence = useMemo(
 		() =>
@@ -133,6 +286,302 @@ export function DigitalPanel({ caseId, digitalEvidence }: DigitalPanelProps) {
 
 	return (
 		<div className="flex flex-col gap-0 w-full">
+			{/* ─── SECTION 0: ADD / IMPORT EVIDENCE ─── */}
+			<section className="border-b border-border-DEFAULT">
+				<div className="px-4 py-2 border-b border-border-DEFAULT bg-surface-1 flex items-center gap-2">
+					<span className="font-mono text-xs uppercase tracking-widest text-muted">
+						Evidence Ingestion
+					</span>
+					<div className="flex-1" />
+					<button
+						type="button"
+						onClick={() => {
+							setMode(mode === "single" ? "none" : "single");
+							setAddError(null);
+							setAddStatus(null);
+						}}
+						className={`font-mono text-[10px] uppercase tracking-widest px-2.5 py-1 border ${
+							mode === "single"
+								? "border-amber text-amber"
+								: "border-border-DEFAULT text-muted hover:text-data"
+						}`}
+						style={{ borderRadius: 0 }}
+					>
+						+ Add Record
+					</button>
+					<button
+						type="button"
+						onClick={() => {
+							setMode(mode === "csv" ? "none" : "csv");
+							setAddError(null);
+							setAddStatus(null);
+						}}
+						className={`font-mono text-[10px] uppercase tracking-widest px-2.5 py-1 border ${
+							mode === "csv"
+								? "border-amber text-amber"
+								: "border-border-DEFAULT text-muted hover:text-data"
+						}`}
+						style={{ borderRadius: 0 }}
+					>
+						Import CSV
+					</button>
+					<button
+						type="button"
+						onClick={() => {
+							setMode(mode === "image" ? "none" : "image");
+							setAddError(null);
+							setAddStatus(null);
+						}}
+						className={`font-mono text-[10px] uppercase tracking-widest px-2.5 py-1 border ${
+							mode === "image"
+								? "border-amber text-amber"
+								: "border-border-DEFAULT text-muted hover:text-data"
+						}`}
+						style={{ borderRadius: 0 }}
+					>
+						Upload Image
+					</button>
+				</div>
+
+				<AnimatePresence initial={false}>
+					{mode === "single" && (
+						<motion.div
+							key="single"
+							initial={{ opacity: 0, height: 0 }}
+							animate={{ opacity: 1, height: "auto" }}
+							exit={{ opacity: 0, height: 0 }}
+							transition={{ duration: 0.2 }}
+							className="p-4 border-b border-border-DEFAULT overflow-hidden"
+						>
+							<div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+								{[
+									{ name: "sourceType", label: "Source Type", type: "select" },
+									{ name: "sourceName", label: "Source Name *", type: "text", placeholder: "e.g. Eastport Cam 08" },
+									{ name: "timestamp", label: "Timestamp *", type: "datetime-local" },
+									{ name: "location", label: "Location", type: "text" },
+									{ name: "subject", label: "Subject", type: "text" },
+									{ name: "confidence", label: "Confidence (0–1)", type: "number" },
+								].map((f) => (
+									<div key={f.name}>
+										<label className="block font-mono text-[10px] uppercase tracking-widest text-muted mb-1">
+											{f.label}
+										</label>
+										{f.type === "select" ? (
+											<select
+												value={form.sourceType}
+												onChange={(e) =>
+													setForm({ ...form, sourceType: e.target.value as DigitalSourceType })
+												}
+												className="w-full bg-surface-2 border border-border-DEFAULT text-data font-mono text-xs px-2 py-1.5 outline-none focus:border-amber"
+											>
+												{["CCTV","MOBILE","FINANCIAL","SOCIAL","GPS","EMAIL","BROWSER"].map((s) => (
+													<option key={s} value={s}>
+														{s}
+													</option>
+												))}
+											</select>
+										) : (
+											<input
+												type={f.type}
+												step={f.type === "number" ? "0.05" : undefined}
+												min={f.type === "number" ? "0" : undefined}
+												max={f.type === "number" ? "1" : undefined}
+												placeholder={f.placeholder}
+												value={(form as unknown as Record<string, string>)[f.name]}
+												onChange={(e) =>
+													setForm({ ...form, [f.name]: e.target.value })
+												}
+												className="w-full bg-surface-2 border border-border-DEFAULT text-data font-mono text-xs px-2 py-1.5 outline-none focus:border-amber"
+											/>
+										)}
+									</div>
+								))}
+							</div>
+							<div className="mt-3">
+								<label className="block font-mono text-[10px] uppercase tracking-widest text-muted mb-1">
+									Description
+								</label>
+								<textarea
+									rows={2}
+									value={form.description}
+									onChange={(e) => setForm({ ...form, description: e.target.value })}
+									placeholder="What happened in this digital event?"
+									className="w-full bg-surface-2 border border-border-DEFAULT text-data font-mono text-xs px-2 py-1.5 outline-none focus:border-amber resize-y"
+								/>
+							</div>
+							<div className="mt-3">
+								<label className="block font-mono text-[10px] uppercase tracking-widest text-muted mb-1">
+									Tags (comma-separated)
+								</label>
+								<input
+									type="text"
+									value={form.tags}
+									onChange={(e) => setForm({ ...form, tags: e.target.value })}
+									placeholder="e.g. loitering, pre-incident, unidentified"
+									className="w-full bg-surface-2 border border-border-DEFAULT text-data font-mono text-xs px-2 py-1.5 outline-none focus:border-amber"
+								/>
+							</div>
+							<div className="mt-3 flex items-center gap-3">
+								<button
+									type="button"
+									onClick={submitSingle}
+									disabled={adding}
+									className="font-mono text-xs uppercase tracking-widest px-4 py-1.5 bg-amber text-base border border-amber disabled:opacity-50"
+									style={{ color: "var(--bg)", borderRadius: 0 }}
+								>
+									{adding ? "Saving..." : "Save Record"}
+								</button>
+								{addStatus && (
+									<span className="font-mono text-xs text-sage">{addStatus}</span>
+								)}
+								{addError && (
+									<span className="font-mono text-xs text-crimson">{addError}</span>
+								)}
+							</div>
+						</motion.div>
+					)}
+
+					{mode === "csv" && (
+						<motion.div
+							key="csv"
+							initial={{ opacity: 0, height: 0 }}
+							animate={{ opacity: 1, height: "auto" }}
+							exit={{ opacity: 0, height: 0 }}
+							transition={{ duration: 0.2 }}
+							className="p-4 border-b border-border-DEFAULT overflow-hidden"
+						>
+							<p className="font-mono text-[11px] text-muted mb-2">
+								Paste comma-separated rows. First row must be the header. Required columns: <span className="text-data">sourceType, sourceName, timestamp</span>. Valid sourceType values: CCTV, MOBILE, FINANCIAL, SOCIAL, GPS, EMAIL, BROWSER.
+							</p>
+							<textarea
+								rows={8}
+								value={csv}
+								onChange={(e) => setCsv(e.target.value)}
+								placeholder={CSV_TEMPLATE}
+								className="w-full bg-surface-2 border border-border-DEFAULT text-data font-mono text-xs px-3 py-2 outline-none focus:border-amber resize-y"
+							/>
+							<div className="mt-2 flex items-center gap-3 flex-wrap">
+								<label
+									className="font-mono text-[10px] uppercase tracking-widest px-3 py-1.5 border border-border-DEFAULT text-muted hover:text-data cursor-pointer"
+									style={{ borderRadius: 0 }}
+								>
+									Load .csv File
+									<input
+										type="file"
+										accept=".csv,text/csv,text/plain"
+										onChange={handleCsvFile}
+										className="hidden"
+									/>
+								</label>
+								<button
+									type="button"
+									onClick={() => setCsv(CSV_TEMPLATE)}
+									className="font-mono text-[10px] uppercase tracking-widest px-3 py-1.5 border border-border-DEFAULT text-muted hover:text-data"
+									style={{ borderRadius: 0 }}
+								>
+									Insert Example
+								</button>
+								<button
+									type="button"
+									onClick={submitCsv}
+									disabled={adding}
+									className="font-mono text-xs uppercase tracking-widest px-4 py-1.5 bg-amber text-base border border-amber disabled:opacity-50"
+									style={{ color: "var(--bg)", borderRadius: 0 }}
+								>
+									{adding ? "Importing..." : "Import"}
+								</button>
+								{addStatus && (
+									<span className="font-mono text-xs text-sage">{addStatus}</span>
+								)}
+								{addError && (
+									<span className="font-mono text-xs text-crimson">{addError}</span>
+								)}
+							</div>
+							<p className="font-mono text-[10px] text-muted mt-2">
+								Note: binary files (video, audio, phone dumps) cannot be analysed
+								directly by the text LLM in this demo. Extract events into rows
+								first — one row per CCTV clip, call, transaction, etc.
+							</p>
+						</motion.div>
+					)}
+
+					{mode === "image" && (
+						<motion.div
+							key="image"
+							initial={{ opacity: 0, height: 0 }}
+							animate={{ opacity: 1, height: "auto" }}
+							exit={{ opacity: 0, height: 0 }}
+							transition={{ duration: 0.2 }}
+							className="p-4 border-b border-border-DEFAULT overflow-hidden"
+						>
+							<p className="font-mono text-[11px] text-muted mb-2">
+								Upload a still image (CCTV frame, phone screenshot, receipt,
+								chat screenshot, map, statement) and a vision LLM will extract
+								structured digital-evidence events into the inventory. Supported:
+								PNG, JPEG, WEBP, GIF · max 5 MB. Requires <span className="text-data">GROQ_API_KEY</span>.
+							</p>
+							<div className="flex items-center gap-3 flex-wrap">
+								<label
+									className="font-mono text-[10px] uppercase tracking-widest px-3 py-1.5 border border-border-DEFAULT text-muted hover:text-data cursor-pointer"
+									style={{ borderRadius: 0 }}
+								>
+									{imageFile ? "Change Image" : "Choose Image"}
+									<input
+										type="file"
+										accept="image/png,image/jpeg,image/webp,image/gif"
+										onChange={(e) => {
+											const f = e.target.files?.[0] ?? null;
+											setImageFile(f);
+											setAddError(null);
+											setAddStatus(null);
+											e.target.value = "";
+										}}
+										className="hidden"
+									/>
+								</label>
+								{imageFile && (
+									<span className="font-mono text-xs text-data truncate max-w-[280px]">
+										{imageFile.name}{" "}
+										<span className="text-muted">
+											({Math.round(imageFile.size / 1024)} KB)
+										</span>
+									</span>
+								)}
+							</div>
+							<div className="mt-3">
+								<label className="block font-mono text-[10px] uppercase tracking-widest text-muted mb-1">
+									Investigator Hint (optional)
+								</label>
+								<input
+									type="text"
+									value={imageHint}
+									onChange={(e) => setImageHint(e.target.value)}
+									placeholder="e.g. CCTV still from Pier 17 camera, 07 Nov 2024 approx 21:18"
+									className="w-full bg-surface-2 border border-border-DEFAULT text-data font-mono text-xs px-2 py-1.5 outline-none focus:border-amber"
+								/>
+							</div>
+							<div className="mt-3 flex items-center gap-3 flex-wrap">
+								<button
+									type="button"
+									onClick={submitImage}
+									disabled={adding || !imageFile}
+									className="font-mono text-xs uppercase tracking-widest px-4 py-1.5 bg-amber text-base border border-amber disabled:opacity-50"
+									style={{ color: "var(--bg)", borderRadius: 0 }}
+								>
+									{adding ? "Extracting..." : "Extract & Ingest"}
+								</button>
+								{addStatus && (
+									<span className="font-mono text-xs text-sage">{addStatus}</span>
+								)}
+								{addError && (
+									<span className="font-mono text-xs text-crimson">{addError}</span>
+								)}
+							</div>
+						</motion.div>
+					)}
+				</AnimatePresence>
+			</section>
+
 			{/* ─── SECTION 1: EVIDENCE INVENTORY ─── */}
 			<section className="border-b border-border-DEFAULT">
 				<div className="px-4 py-2 border-b border-border-DEFAULT bg-surface-1">
@@ -246,14 +695,28 @@ export function DigitalPanel({ caseId, digitalEvidence }: DigitalPanelProps) {
 					</span>
 				</div>
 				<div className="p-4">
-					<button
-						onClick={handleRunCorrelation}
-						disabled={correlating}
-						className="font-mono text-xs uppercase tracking-widest px-4 py-2 border border-amber text-amber disabled:opacity-50 disabled:cursor-not-allowed"
-						style={{ borderRadius: 0 }}
-					>
-						{correlating ? "Correlating..." : "Run Correlation Analysis"}
-					</button>
+					<div className="flex items-center gap-3">
+						<button
+							onClick={handleRunCorrelation}
+							disabled={correlating || digitalEvidence.length === 0}
+							className="font-mono text-xs uppercase tracking-widest px-4 py-2 border border-amber text-amber disabled:opacity-50 disabled:cursor-not-allowed"
+							style={{ borderRadius: 0 }}
+						>
+							{correlating ? "Correlating..." : "Run Correlation Analysis"}
+						</button>
+						{digitalEvidence.length === 0 && (
+							<span className="font-mono text-xs text-muted">
+								Add digital evidence records above to enable correlation.
+							</span>
+						)}
+						{digitalEvidence.length > 0 && !correlationResult && !correlating && (
+							<span className="font-mono text-xs text-muted">
+								Analyses {digitalEvidence.length} record
+								{digitalEvidence.length === 1 ? "" : "s"} for timeline gaps,
+								bursts, repeat subjects, and suspicious anomaly scores.
+							</span>
+						)}
+					</div>
 
 					{correlationError && (
 						<div className="mt-3 font-mono text-xs text-crimson border border-crimson px-3 py-2">
@@ -269,6 +732,20 @@ export function DigitalPanel({ caseId, digitalEvidence }: DigitalPanelProps) {
 								transition={{ duration: 0.25, ease: "easeOut" }}
 								className="mt-4 flex flex-col gap-4"
 							>
+								{correlationResult.summary && (
+									<div className="bg-surface-2 border-l-2 border-amber px-3 py-2">
+										<div className="font-mono text-[10px] uppercase tracking-widest text-muted mb-1">
+											Investigator Summary
+											{typeof correlationResult.eventCount === "number" &&
+												` · ${correlationResult.eventCount} event${
+													correlationResult.eventCount === 1 ? "" : "s"
+												}`}
+										</div>
+										<p className="text-sm text-data leading-relaxed">
+											{correlationResult.summary}
+										</p>
+									</div>
+								)}
 								{/* Anomalies */}
 								<div>
 									<div className="font-mono text-xs uppercase tracking-widest text-muted mb-2">

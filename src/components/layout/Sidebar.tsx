@@ -2,13 +2,15 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { Shield, LayoutDashboard, FolderOpen, Plus } from "lucide-react";
+import { Shield, LayoutDashboard, FolderOpen, Plus, Database, Map } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 const NAV_ITEMS = [
 	{ label: "Dashboard", href: "/", icon: LayoutDashboard },
 	{ label: "Cases", href: "/cases", icon: FolderOpen },
 	{ label: "New Case", href: "/cases/new", icon: Plus },
+	{ label: "Intel Map", href: "/map", icon: Map },
+	{ label: "Inspector", href: "/inspect", icon: Database },
 ] as const;
 
 export default function Sidebar() {

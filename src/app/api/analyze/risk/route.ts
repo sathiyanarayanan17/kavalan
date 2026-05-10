@@ -64,9 +64,9 @@ export async function POST(request: NextRequest) {
 		db.prepare(
 			"UPDATE cases SET riskScore = $riskScore, riskLevel = $riskLevel WHERE id = $id",
 		).run({
-			$riskScore: result.overall,
-			$riskLevel: result.tier,
-			$id: caseId,
+			riskScore: result.overall,
+			riskLevel: result.tier,
+			id: caseId,
 		});
 
 		return NextResponse.json({ caseId, ...result });

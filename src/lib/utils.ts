@@ -9,9 +9,12 @@ export function cn(...inputs: ClassValue[]): string {
 
 /**
  * Formats an ISO date string to "DD MMM YYYY" or "DD MMM YYYY HH:mm".
+ * Returns a dash for empty/invalid inputs so UI never crashes.
  */
 export function formatDate(iso: string, includeTime = false): string {
+	if (!iso) return "—";
 	const date = parseISO(iso);
+	if (Number.isNaN(date.getTime())) return "—";
 	return includeTime
 		? format(date, "dd MMM yyyy HH:mm")
 		: format(date, "dd MMM yyyy");
@@ -21,7 +24,10 @@ export function formatDate(iso: string, includeTime = false): string {
  * Formats an ISO date string to 24-hour "HH:mm:ss".
  */
 export function formatTime(iso: string): string {
-	return format(parseISO(iso), "HH:mm:ss");
+	if (!iso) return "—";
+	const date = parseISO(iso);
+	if (Number.isNaN(date.getTime())) return "—";
+	return format(date, "HH:mm:ss");
 }
 
 /**
@@ -97,7 +103,10 @@ export function formatTimestamp(iso: string): string {
 }
 
 export function timeAgo(iso: string): string {
-	return formatDistanceToNow(parseISO(iso), { addSuffix: true });
+	if (!iso) return "—";
+	const date = parseISO(iso);
+	if (Number.isNaN(date.getTime())) return "—";
+	return formatDistanceToNow(date, { addSuffix: true });
 }
 
 /**

@@ -1,5 +1,4 @@
-// Uses Node 22+ built-in SQLite — no native compilation needed
-import { DatabaseSync } from "node:sqlite";
+import Database from "better-sqlite3";
 import path from "path";
 import fs from "fs";
 
@@ -17,7 +16,7 @@ if (!fs.existsSync(dataDir)) {
 	fs.mkdirSync(dataDir, { recursive: true });
 }
 
-export const db = new DatabaseSync(DB_PATH);
+export const db = new Database(DB_PATH);
 
 export function initDb(): void {
 	db.exec("PRAGMA journal_mode = WAL");
@@ -39,7 +38,10 @@ export function initDb(): void {
       suspectCount INTEGER NOT NULL DEFAULT 0,
       evidenceCount INTEGER NOT NULL DEFAULT 0,
       victimName TEXT NOT NULL,
-      tags TEXT NOT NULL DEFAULT '[]'
+      tags TEXT NOT NULL DEFAULT '[]',
+      lat REAL,
+      lng REAL,
+      geocodedAt TEXT
     );
 
     CREATE TABLE IF NOT EXISTS evidence (
@@ -52,7 +54,8 @@ export function initDb(): void {
       location TEXT NOT NULL,
       analyst TEXT NOT NULL,
       notes TEXT NOT NULL DEFAULT '',
-      confidence INTEGER NOT NULL DEFAULT 50
+      confidence REAL NOT NULL DEFAULT 0,
+      imagePath TEXT NOT NULL DEFAULT ''
     );
 
     CREATE TABLE IF NOT EXISTS autopsy_reports (
@@ -69,7 +72,7 @@ export function initDb(): void {
       bodyTemperature REAL NOT NULL DEFAULT 0,
       rigorMortisStage INTEGER NOT NULL DEFAULT 0,
       livorMortisState TEXT NOT NULL DEFAULT '',
-      confidence INTEGER NOT NULL DEFAULT 0,
+      confidence REAL NOT NULL DEFAULT 0,
       analysisNotes TEXT NOT NULL DEFAULT ''
     );
 
@@ -84,7 +87,8 @@ export function initDb(): void {
       lastSeenAlive TEXT NOT NULL DEFAULT '',
       estimatedTodEarliest TEXT NOT NULL,
       estimatedTodLatest TEXT NOT NULL,
-      confidenceLevel INTEGER NOT NULL DEFAULT 0,
+      centralEstimate TEXT NOT NULL DEFAULT '',
+      confidenceLevel REAL NOT NULL DEFAULT 0,
       methodology TEXT NOT NULL DEFAULT '',
       notes TEXT NOT NULL DEFAULT ''
     );
@@ -98,8 +102,8 @@ export function initDb(): void {
       location TEXT NOT NULL,
       subject TEXT NOT NULL,
       description TEXT NOT NULL,
-      confidence INTEGER NOT NULL DEFAULT 50,
-      anomalyScore INTEGER NOT NULL DEFAULT 0,
+      confidence REAL NOT NULL DEFAULT 0,
+      anomalyScore REAL NOT NULL DEFAULT 0,
       tags TEXT NOT NULL DEFAULT '[]'
     );
 
@@ -111,7 +115,61 @@ export function initDb(): void {
       createdAt TEXT NOT NULL,
       agent TEXT NOT NULL
     );
+
+    CREATE TABLE IF NOT EXISTS ai_calls (
+      id TEXT PRIMARY KEY,
+      createdAt TEXT NOT NULL,
+      purpose TEXT NOT NULL,
+      provider TEXT NOT NULL,
+      model TEXT NOT NULL,
+      durationMs INTEGER NOT NULL,
+      status TEXT NOT NULL,
+      promptChars INTEGER NOT NULL DEFAULT 0,
+      responseChars INTEGER NOT NULL DEFAULT 0,
+      errorMessage TEXT NOT NULL DEFAULT '',
+      samplePrompt TEXT NOT NULL DEFAULT '',
+      sampleResponse TEXT NOT NULL DEFAULT ''
+    );
   `);
+
+	// Idempotent column adds for existing DBs that pre-date a schema change.
+	const existingCols = (
+		db.prepare("PRAGMA table_info(cases)").all() as Array<{ name: string }>
+	).map((c) => c.name);
+	if (!existingCols.includes("lat"))
+		db.exec("ALTER TABLE cases ADD COLUMN lat REAL");
+	if (!existingCols.includes("lng"))
+		db.exec("ALTER TABLE cases ADD COLUMN lng REAL");
+	if (!existingCols.includes("geocodedAt"))
+		db.exec("ALTER TABLE cases ADD COLUMN geocodedAt TEXT");
+
+	const todCols = (
+		db.prepare("PRAGMA table_info(tod_estimates)").all() as Array<{
+			name: string;
+		}>
+	).map((c) => c.name);
+	if (!todCols.includes("centralEstimate"))
+		db.exec(
+			"ALTER TABLE tod_estimates ADD COLUMN centralEstimate TEXT NOT NULL DEFAULT ''",
+		);
+
+	const evidenceCols = (
+		db.prepare("PRAGMA table_info(evidence)").all() as Array<{
+			name: string;
+		}>
+	).map((c) => c.name);
+	if (!evidenceCols.includes("imagePath"))
+		db.exec(
+			"ALTER TABLE evidence ADD COLUMN imagePath TEXT NOT NULL DEFAULT ''",
+		);
+
+	const casesCols2 = (
+		db.prepare("PRAGMA table_info(cases)").all() as Array<{ name: string }>
+	).map((c) => c.name);
+	if (!casesCols2.includes("autopsyDraft"))
+		db.exec(
+			"ALTER TABLE cases ADD COLUMN autopsyDraft TEXT NOT NULL DEFAULT ''",
+		);
 
 	const row = db.prepare("SELECT COUNT(*) as count FROM cases").get() as {
 		count: number;
@@ -122,105 +180,101 @@ export function initDb(): void {
 }
 
 export function seedIfEmpty(): void {
-	db.exec("BEGIN");
-	try {
-		const insertCase = db.prepare(`
-      INSERT OR IGNORE INTO cases
-        (id, caseRef, title, description, status, riskLevel, riskScore, location,
-         dateCreated, dateOfIncident, assignedAgent, suspectCount, evidenceCount, victimName, tags)
-      VALUES
-        ($id, $caseRef, $title, $description, $status, $riskLevel, $riskScore, $location,
-         $dateCreated, $dateOfIncident, $assignedAgent, $suspectCount, $evidenceCount, $victimName, $tags)
-    `);
+	const insertCase = db.prepare(`
+    INSERT OR IGNORE INTO cases
+      (id, caseRef, title, description, status, riskLevel, riskScore, location,
+       dateCreated, dateOfIncident, assignedAgent, suspectCount, evidenceCount, victimName, tags)
+    VALUES
+      (@id, @caseRef, @title, @description, @status, @riskLevel, @riskScore, @location,
+       @dateCreated, @dateOfIncident, @assignedAgent, @suspectCount, @evidenceCount, @victimName, @tags)
+  `);
 
-		const insertEvidence = db.prepare(`
-      INSERT OR IGNORE INTO evidence
-        (id, caseId, catalogRef, type, description, collectedAt, location, analyst, notes, confidence)
-      VALUES
-        ($id, $caseId, $catalogRef, $type, $description, $collectedAt, $location, $analyst, $notes, $confidence)
-    `);
+	const insertEvidence = db.prepare(`
+    INSERT OR IGNORE INTO evidence
+      (id, caseId, catalogRef, type, description, collectedAt, location, analyst, notes, confidence)
+    VALUES
+      (@id, @caseId, @catalogRef, @type, @description, @collectedAt, @location, @analyst, @notes, @confidence)
+  `);
 
-		const insertDigital = db.prepare(`
-      INSERT OR IGNORE INTO digital_evidence
-        (id, caseId, sourceType, sourceName, timestamp, location, subject, description, confidence, anomalyScore, tags)
-      VALUES
-        ($id, $caseId, $sourceType, $sourceName, $timestamp, $location, $subject, $description, $confidence, $anomalyScore, $tags)
-    `);
+	const insertDigital = db.prepare(`
+    INSERT OR IGNORE INTO digital_evidence
+      (id, caseId, sourceType, sourceName, timestamp, location, subject, description, confidence, anomalyScore, tags)
+    VALUES
+      (@id, @caseId, @sourceType, @sourceName, @timestamp, @location, @subject, @description, @confidence, @anomalyScore, @tags)
+  `);
 
-		const insertActivity = db.prepare(`
-      INSERT OR IGNORE INTO case_activities
-        (id, caseId, type, description, createdAt, agent)
-      VALUES
-        ($id, $caseId, $type, $description, $createdAt, $agent)
-    `);
+	const insertActivity = db.prepare(`
+    INSERT OR IGNORE INTO case_activities
+      (id, caseId, type, description, createdAt, agent)
+    VALUES
+      (@id, @caseId, @type, @description, @createdAt, @agent)
+  `);
 
+	const runAll = db.transaction(() => {
 		for (const c of SEED_CASES) {
 			insertCase.run({
-				$id: c.id,
-				$caseRef: c.caseRef,
-				$title: c.title,
-				$description: c.description,
-				$status: c.status,
-				$riskLevel: c.riskLevel,
-				$riskScore: c.riskScore,
-				$location: c.location,
-				$dateCreated: c.dateCreated,
-				$dateOfIncident: c.dateOfIncident,
-				$assignedAgent: c.assignedAgent,
-				$suspectCount: c.suspectCount,
-				$evidenceCount: c.evidenceCount,
-				$victimName: c.victimName,
-				$tags: c.tags,
+				id: c.id,
+				caseRef: c.caseRef,
+				title: c.title,
+				description: c.description,
+				status: c.status,
+				riskLevel: c.riskLevel,
+				riskScore: c.riskScore,
+				location: c.location,
+				dateCreated: c.dateCreated,
+				dateOfIncident: c.dateOfIncident,
+				assignedAgent: c.assignedAgent,
+				suspectCount: c.suspectCount,
+				evidenceCount: c.evidenceCount,
+				victimName: c.victimName,
+				tags: c.tags,
 			});
 		}
 
 		for (const e of SEED_EVIDENCE) {
 			insertEvidence.run({
-				$id: e.id,
-				$caseId: e.caseId,
-				$catalogRef: e.catalogRef,
-				$type: e.type,
-				$description: e.description,
-				$collectedAt: e.collectedAt,
-				$location: e.location,
-				$analyst: e.analyst,
-				$notes: e.notes,
-				$confidence: e.confidence,
+				id: e.id,
+				caseId: e.caseId,
+				catalogRef: e.catalogRef,
+				type: e.type,
+				description: e.description,
+				collectedAt: e.collectedAt,
+				location: e.location,
+				analyst: e.analyst,
+				notes: e.notes,
+				confidence: e.confidence,
 			});
 		}
 
 		for (const d of SEED_DIGITAL_EVIDENCE) {
 			insertDigital.run({
-				$id: d.id,
-				$caseId: d.caseId,
-				$sourceType: d.sourceType,
-				$sourceName: d.sourceName,
-				$timestamp: d.timestamp,
-				$location: d.location,
-				$subject: d.subject,
-				$description: d.description,
-				$confidence: d.confidence,
-				$anomalyScore: d.anomalyScore,
-				$tags: d.tags,
+				id: d.id,
+				caseId: d.caseId,
+				sourceType: d.sourceType,
+				sourceName: d.sourceName,
+				timestamp: d.timestamp,
+				location: d.location,
+				subject: d.subject,
+				description: d.description,
+				confidence: d.confidence,
+				anomalyScore: d.anomalyScore,
+				tags: d.tags,
 			});
 		}
 
 		for (const a of SEED_ACTIVITIES) {
 			insertActivity.run({
-				$id: a.id,
-				$caseId: a.caseId,
-				$type: a.type,
-				$description: a.description,
-				$createdAt: a.createdAt,
-				$agent: a.agent,
+				id: a.id,
+				caseId: a.caseId,
+				type: a.type,
+				description: a.description,
+				createdAt: a.createdAt,
+				agent: a.agent,
 			});
 		}
+	});
 
-		db.exec("COMMIT");
-	} catch (e) {
-		db.exec("ROLLBACK");
-		throw e;
-	}
+	runAll();
 }
 
 initDb();

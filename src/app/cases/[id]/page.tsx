@@ -7,6 +7,7 @@ import { format } from "date-fns";
 import { RiskGauge } from "@/components/cases/RiskGauge";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
+import { AddEvidenceForm } from "@/components/cases/AddEvidenceForm";
 import type { Case, Evidence, CaseActivity } from "@/types";
 
 interface CaseDetail extends Case {
@@ -69,21 +70,23 @@ export default function CaseOverviewPage() {
 	const [error, setError] = useState<string | null>(null);
 	const [analyzingRisk, setAnalyzingRisk] = useState(false);
 
-	useEffect(() => {
+	const loadCase = async () => {
 		if (!id) return;
-		const load = async () => {
-			try {
-				const res = await fetch(`/api/cases/${id}`);
-				if (!res.ok) throw new Error("Failed to load case");
-				const data = await res.json();
-				setCaseData(data);
-			} catch (err) {
-				setError(err instanceof Error ? err.message : "Unknown error");
-			} finally {
-				setLoading(false);
-			}
-		};
-		load();
+		try {
+			const res = await fetch(`/api/cases/${id}`);
+			if (!res.ok) throw new Error("Failed to load case");
+			const data = await res.json();
+			setCaseData(data);
+		} catch (err) {
+			setError(err instanceof Error ? err.message : "Unknown error");
+		} finally {
+			setLoading(false);
+		}
+	};
+
+	useEffect(() => {
+		loadCase();
+		// eslint-disable-next-line react-hooks/exhaustive-deps
 	}, [id]);
 
 	const runRiskAnalysis = async () => {
@@ -236,6 +239,12 @@ export default function CaseOverviewPage() {
 						>
 							EVIDENCE INVENTORY
 						</h3>
+						{id && (
+							<AddEvidenceForm
+								caseId={id as string}
+								onCreated={() => loadCase()}
+							/>
+						)}
 						{!caseData.evidence || caseData.evidence.length === 0 ? (
 							<p
 								className="font-mono text-xs"
@@ -258,6 +267,7 @@ export default function CaseOverviewPage() {
 												"CATALOG REF",
 												"TYPE",
 												"DESCRIPTION",
+												"IMAGE",
 												"COLLECTED",
 												"ANALYST",
 												"CONFIDENCE",
@@ -315,6 +325,39 @@ export default function CaseOverviewPage() {
 													}}
 												>
 													{ev.description}
+												</td>
+												<td style={{ padding: "8px 12px" }}>
+													{ev.imagePath ? (
+														/* eslint-disable-next-line @next/next/no-img-element */
+														<a
+															href={`/api/evidence/${ev.id}/image`}
+															target="_blank"
+															rel="noreferrer"
+															title="Open full-size image"
+														>
+															<img
+																src={`/api/evidence/${ev.id}/image`}
+																alt="Evidence"
+																style={{
+																	width: 48,
+																	height: 48,
+																	objectFit: "cover",
+																	border: "1px solid var(--border)",
+																	display: "block",
+																}}
+															/>
+														</a>
+													) : (
+														<span
+															className="font-mono"
+															style={{
+																fontSize: 10,
+																color: "var(--text-muted)",
+															}}
+														>
+															—
+														</span>
+													)}
 												</td>
 												<td
 													style={{

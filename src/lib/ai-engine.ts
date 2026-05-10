@@ -1,11 +1,13 @@
 /**
  * KAVALAN AI Engine
- * - Autopsy analysis: Claude Haiku 4.5 via AWS Bedrock (real NLP)
- * - Digital correlation: Claude Haiku 4.5 via AWS Bedrock (real intelligence)
+ * - Autopsy analysis: Llama 3.3 70B via Groq (real NLP)
+ * - Digital correlation: Llama 3.3 70B via Groq (real intelligence)
+ * - Image evidence extraction: Llama 3.2 Vision via Groq (multimodal)
  * - TOD estimation: Henssge nomogram (real forensic math, no AI needed)
  * - Risk scoring: weighted formula (deterministic, auditable)
  */
 import type { RiskLevel } from "@/types";
+import { db } from "@/lib/db";
 import {
 	henssgeNomogram,
 	rigorMortisToHours,
@@ -15,47 +17,238 @@ import {
 	calculateAnomaly,
 } from "@/lib/forensics";
 
-// ─── Bedrock client ───────────────────────────────────────────────────────────
+// ─── LLM client (Groq, OpenAI-compatible) ────────────────────────────────────
 
-const BEDROCK_MODEL =
-	process.env.BEDROCK_MODEL ?? "us.anthropic.claude-haiku-4-5-20251001-v1:0";
-const BEDROCK_REGION = process.env.BEDROCK_REGION ?? "us-east-1";
+const GROQ_BASE_URL =
+	process.env.GROQ_BASE_URL ?? "https://api.groq.com/openai/v1";
+const GROQ_MODEL = process.env.GROQ_MODEL ?? "llama-3.3-70b-versatile";
+const GROQ_VISION_MODEL =
+	process.env.GROQ_VISION_MODEL ?? "meta-llama/llama-4-scout-17b-16e-instruct";
+
+function getTextKey(): string {
+	const key = process.env.GROQ_API_KEY;
+	if (!key) throw new Error("GROQ_API_KEY not set");
+	return key;
+}
+
+function getVisionKey(): string {
+	// Prefer a dedicated vision key if set, else fall back to the text key.
+	const key = process.env.GROQ_VISION_API_KEY ?? process.env.GROQ_API_KEY;
+	if (!key)
+		throw new Error(
+			"GROQ_VISION_API_KEY or GROQ_API_KEY must be set for vision calls",
+		);
+	return key;
+}
+
+// DB handle for AI call telemetry (imported statically above).
+function logDb() {
+	return db;
+}
+
+function logAiCall(row: {
+	purpose: string;
+	model: string;
+	durationMs: number;
+	status: "ok" | "error";
+	promptChars: number;
+	responseChars: number;
+	errorMessage?: string;
+	samplePrompt?: string;
+	sampleResponse?: string;
+}) {
+	const d = logDb();
+	if (!d) return;
+	try {
+		d.prepare(
+			`INSERT INTO ai_calls
+			 (id,createdAt,purpose,provider,model,durationMs,status,promptChars,responseChars,errorMessage,samplePrompt,sampleResponse)
+			 VALUES ($id,$createdAt,$purpose,$provider,$model,$durationMs,$status,$promptChars,$responseChars,$errorMessage,$samplePrompt,$sampleResponse)`,
+		).run({
+			id: `aic-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`,
+			createdAt: new Date().toISOString(),
+			purpose: row.purpose,
+			provider: "groq",
+			model: row.model,
+			durationMs: row.durationMs,
+			status: row.status,
+			promptChars: row.promptChars,
+			responseChars: row.responseChars,
+			errorMessage: row.errorMessage ?? "",
+			samplePrompt: (row.samplePrompt ?? "").slice(0, 400),
+			sampleResponse: (row.sampleResponse ?? "").slice(0, 400),
+		});
+	} catch (e) {
+		console.warn("ai_calls log failed:", (e as Error).message);
+	}
+	console.log(
+		`[AI] ${row.purpose} ${row.status} ${row.model} ${row.durationMs}ms promptChars=${row.promptChars} respChars=${row.responseChars}`,
+	);
+}
 
 async function callClaude(
 	systemPrompt: string,
 	userMessage: string,
 	maxTokens = 1024,
+	purpose = "text",
 ): Promise<string> {
-	const apiKey = process.env.BEDROCK_API_KEY;
-	if (!apiKey) throw new Error("BEDROCK_API_KEY not set");
-
-	const url = `https://bedrock-runtime.${BEDROCK_REGION}.amazonaws.com/model/${BEDROCK_MODEL}/invoke`;
+	const apiKey = getTextKey();
+	const startedAt = Date.now();
 
 	const body = {
-		anthropic_version: "bedrock-2023-05-31",
+		model: GROQ_MODEL,
 		max_tokens: maxTokens,
-		system: systemPrompt,
-		messages: [{ role: "user", content: userMessage }],
+		temperature: 0.2,
+		response_format: { type: "json_object" },
+		messages: [
+			{ role: "system", content: systemPrompt },
+			{ role: "user", content: userMessage },
+		],
 	};
 
-	const res = await fetch(url, {
-		method: "POST",
-		headers: {
-			Authorization: `Bearer ${apiKey}`,
-			"Content-Type": "application/json",
-		},
-		body: JSON.stringify(body),
-	});
+	try {
+		const res = await fetch(`${GROQ_BASE_URL}/chat/completions`, {
+			method: "POST",
+			headers: {
+				Authorization: `Bearer ${apiKey}`,
+				"Content-Type": "application/json",
+			},
+			body: JSON.stringify(body),
+		});
 
-	if (!res.ok) {
-		const err = await res.text();
-		throw new Error(`Bedrock error ${res.status}: ${err}`);
+		if (!res.ok) {
+			const err = await res.text();
+			logAiCall({
+				purpose,
+				model: GROQ_MODEL,
+				durationMs: Date.now() - startedAt,
+				status: "error",
+				promptChars: systemPrompt.length + userMessage.length,
+				responseChars: 0,
+				errorMessage: `Groq ${res.status}: ${err.slice(0, 300)}`,
+				samplePrompt: userMessage,
+			});
+			throw new Error(`Groq error ${res.status}: ${err}`);
+		}
+
+		const data = (await res.json()) as {
+			choices?: Array<{ message?: { content?: string } }>;
+		};
+		const text = data.choices?.[0]?.message?.content ?? "";
+		logAiCall({
+			purpose,
+			model: GROQ_MODEL,
+			durationMs: Date.now() - startedAt,
+			status: "ok",
+			promptChars: systemPrompt.length + userMessage.length,
+			responseChars: text.length,
+			samplePrompt: userMessage,
+			sampleResponse: text,
+		});
+		return text;
+	} catch (err) {
+		// network-level failure
+		logAiCall({
+			purpose,
+			model: GROQ_MODEL,
+			durationMs: Date.now() - startedAt,
+			status: "error",
+			promptChars: systemPrompt.length + userMessage.length,
+			responseChars: 0,
+			errorMessage: (err as Error).message,
+			samplePrompt: userMessage,
+		});
+		throw err;
 	}
+}
 
-	const data = (await res.json()) as {
-		content: Array<{ type: string; text: string }>;
+/**
+ * Multimodal variant: sends one or more images plus a text prompt to a Groq
+ * vision model and returns the model's text response.
+ */
+export async function callClaudeVision(
+	systemPrompt: string,
+	userMessage: string,
+	images: Array<{ mediaType: string; base64: string }>,
+	maxTokens = 1024,
+	purpose = "vision",
+): Promise<string> {
+	const apiKey = getVisionKey();
+	const startedAt = Date.now();
+
+	const content: Array<Record<string, unknown>> = images.map((img) => ({
+		type: "image_url",
+		image_url: {
+			url: `data:${img.mediaType};base64,${img.base64}`,
+		},
+	}));
+	content.push({ type: "text", text: userMessage });
+
+	// Groq vision models don't always support response_format=json_object; keep
+	// the prompt strict instead and parse defensively downstream.
+	const body = {
+		model: GROQ_VISION_MODEL,
+		max_tokens: maxTokens,
+		temperature: 0.2,
+		messages: [
+			{ role: "system", content: systemPrompt },
+			{ role: "user", content },
+		],
 	};
-	return data.content.find((b) => b.type === "text")?.text ?? "";
+
+	try {
+		const res = await fetch(`${GROQ_BASE_URL}/chat/completions`, {
+			method: "POST",
+			headers: {
+				Authorization: `Bearer ${apiKey}`,
+				"Content-Type": "application/json",
+			},
+			body: JSON.stringify(body),
+		});
+
+		if (!res.ok) {
+			const err = await res.text();
+			logAiCall({
+				purpose,
+				model: GROQ_VISION_MODEL,
+				durationMs: Date.now() - startedAt,
+				status: "error",
+				promptChars: systemPrompt.length + userMessage.length,
+				responseChars: 0,
+				errorMessage: `Groq vision ${res.status}: ${err.slice(0, 300)}`,
+				samplePrompt: userMessage,
+			});
+			throw new Error(`Groq vision error ${res.status}: ${err}`);
+		}
+
+		const data = (await res.json()) as {
+			choices?: Array<{ message?: { content?: string } }>;
+		};
+		const text = data.choices?.[0]?.message?.content ?? "";
+		logAiCall({
+			purpose,
+			model: GROQ_VISION_MODEL,
+			durationMs: Date.now() - startedAt,
+			status: "ok",
+			promptChars: systemPrompt.length + userMessage.length,
+			responseChars: text.length,
+			samplePrompt: userMessage,
+			sampleResponse: text,
+		});
+		return text;
+	} catch (err) {
+		logAiCall({
+			purpose,
+			model: GROQ_VISION_MODEL,
+			durationMs: Date.now() - startedAt,
+			status: "error",
+			promptChars: systemPrompt.length + userMessage.length,
+			responseChars: 0,
+			errorMessage: (err as Error).message,
+			samplePrompt: userMessage,
+		});
+		throw err;
+	}
 }
 
 // ─── Interfaces ───────────────────────────────────────────────────────────────
@@ -103,10 +296,12 @@ export interface TodResult {
 export interface DigitalCorrelationInput {
 	events: Array<{
 		sourceType: string;
+		sourceName?: string;
 		timestamp: string;
 		location: string;
 		subject: string;
 		description: string;
+		anomalyScore?: number;
 	}>;
 }
 
@@ -152,7 +347,214 @@ export interface RiskScoreResult {
 	recommendations: string[];
 }
 
-// ─── analyzeAutopsyReport — real Claude NLP ───────────────────────────────────
+// ─── wound-count heuristic ────────────────────────────────────────────────────
+
+const WOUND_INJURY_WORDS = [
+	"wound",
+	"wounds",
+	"laceration",
+	"lacerations",
+	"injury",
+	"injuries",
+	"cut",
+	"cuts",
+	"slit",
+	"slits",
+	"slash",
+	"slashes",
+	"gash",
+	"gashes",
+	"scratch",
+	"scratches",
+	"abrasion",
+	"abrasions",
+	"contusion",
+	"contusions",
+	"bruise",
+	"bruises",
+	"fracture",
+	"fractures",
+	"stab",
+	"stabs",
+	"stabbing",
+	"puncture",
+	"punctures",
+	"gunshot",
+	"gsw",
+	"entry",
+	"exit",
+	"burn",
+	"burns",
+	"bite",
+	"bites",
+	"hematoma",
+	"hematomas",
+	"fissure",
+	"fissures",
+	"perforation",
+	"perforations",
+	"incision",
+	"incisions",
+	"trauma",
+];
+
+const WOUND_BODY_PARTS = [
+	"throat",
+	"neck",
+	"thigh",
+	"chest",
+	"abdomen",
+	"stomach",
+	"belly",
+	"head",
+	"skull",
+	"forehead",
+	"temple",
+	"face",
+	"jaw",
+	"cheek",
+	"eye",
+	"ear",
+	"nose",
+	"mouth",
+	"lip",
+	"tongue",
+	"back",
+	"spine",
+	"shoulder",
+	"arm",
+	"forearm",
+	"elbow",
+	"wrist",
+	"hand",
+	"finger",
+	"palm",
+	"leg",
+	"calf",
+	"shin",
+	"knee",
+	"ankle",
+	"foot",
+	"toe",
+	"hip",
+	"rib",
+	"groin",
+	"torso",
+	"flank",
+	"buttock",
+	"scalp",
+];
+
+const WOUND_NUMBER_WORDS: Record<string, number> = {
+	one: 1,
+	two: 2,
+	three: 3,
+	four: 4,
+	five: 5,
+	six: 6,
+	seven: 7,
+	eight: 8,
+	nine: 9,
+	ten: 10,
+	multiple: 3,
+	several: 3,
+	numerous: 4,
+	many: 4,
+	few: 2,
+};
+
+/**
+ * Count distinct wound/injury mentions in free-form autopsy text.
+ * Handles both clinical ("three lacerations to the scalp") and informal
+ * ("slit on throat, scratch on thigh") descriptions.
+ */
+export function countWoundsHeuristic(text: string): number {
+	if (!text) return 0;
+	const lower = text.toLowerCase();
+
+	// 1. Explicit numeric patterns: "two stab wounds", "3 lacerations", "multiple bruises"
+	const injuryAlt = WOUND_INJURY_WORDS.join("|");
+	let explicitCount = 0;
+	const numericRe = new RegExp(
+		`\\b(\\d+|${Object.keys(WOUND_NUMBER_WORDS).join("|")})\\s+\\w*\\s*(?:${injuryAlt})\\b`,
+		"gi",
+	);
+	let m: RegExpExecArray | null;
+	while ((m = numericRe.exec(lower)) !== null) {
+		const token = m[1];
+		const n = /^\d+$/.test(token)
+			? parseInt(token, 10)
+			: (WOUND_NUMBER_WORDS[token] ?? 1);
+		explicitCount += n;
+	}
+
+	// 2. Segment-based count: split by common separators, tally segments that
+	//    mention an injury word or a body part.
+	const segments = lower
+		.split(/[,;./\n]|\band\b|\bplus\b|\balso\b|\bthen\b/g)
+		.map((s) => s.trim())
+		.filter(Boolean);
+
+	const injuryRes = WOUND_INJURY_WORDS.map(
+		(w) => new RegExp(`\\b${w}\\b`, "i"),
+	);
+	const bodyRes = WOUND_BODY_PARTS.map((w) => new RegExp(`\\b${w}\\b`, "i"));
+
+	let segmentCount = 0;
+	for (const seg of segments) {
+		const hasInjury = injuryRes.some((r) => r.test(seg));
+		const hasBody = bodyRes.some((r) => r.test(seg));
+		// Count if the segment mentions an injury term, OR mentions a body part
+		// alongside any short descriptor (catches informal phrases).
+		if (hasInjury || (hasBody && seg.length < 80)) segmentCount++;
+	}
+
+	return Math.max(explicitCount, segmentCount);
+}
+
+/**
+ * Heuristic confidence score (0-100) based on what was actually extracted.
+ * Used when the LLM returns 0 or an invalid confidence, so the UI never
+ * renders "0%" for a call that did produce real output.
+ */
+export function computeConfidenceHeuristic(
+	reportText: string,
+	parsed: {
+		causeOfDeath?: string;
+		mannerOfDeath?: string;
+		injuryPattern?: string;
+		toxicologyFindings?: string;
+	},
+	woundsCount: number,
+): number {
+	const trimmed = (reportText ?? "").trim();
+	if (trimmed.length === 0) return 5;
+
+	// Baseline: reward plausibly-sized report input.
+	let score = 15;
+	if (trimmed.length >= 80) score += 10;
+	if (trimmed.length >= 250) score += 10;
+	if (trimmed.length >= 600) score += 10;
+
+	// Reward extractions that actually named something.
+	const cod = (parsed.causeOfDeath ?? "").toLowerCase();
+	if (cod && !cod.includes("undetermined") && !cod.includes("pending"))
+		score += 15;
+
+	const manner = (parsed.mannerOfDeath ?? "").toUpperCase();
+	if (manner && manner !== "UNDETERMINED") score += 10;
+
+	if (woundsCount > 0) score += 8;
+
+	const tox = (parsed.toxicologyFindings ?? "").toLowerCase();
+	if (tox && !tox.includes("no significant") && tox.length > 10) score += 7;
+
+	const injury = (parsed.injuryPattern ?? "").trim();
+	if (injury.length > 20) score += 10;
+
+	return Math.max(10, Math.min(90, Math.round(score)));
+}
+
 
 export async function analyzeAutopsyReport(
 	input: AutopsyAnalysisInput,
@@ -194,11 +596,16 @@ Always respond with valid JSON only — no markdown, no explanation outside the 
 
 	const userMessage = `Analyze this autopsy report and return a JSON object with exactly these fields:
 - causeOfDeath: string (precise medical cause, e.g. "Blunt force traumatic brain injury")
-- mannerOfDeath: one of "HOMICIDE" | "SUICIDE" | "NATURAL" | "ACCIDENTAL" | "UNDETERMINED"
+- mannerOfDeath: one of "HOMICIDE" | "SUICIDE" | "NATURAL" | "ACCIDENTAL" | "UNDETERMINED". Classify based on these signals:
+   * HOMICIDE: defensive wounds, multiple impact points, ligature marks, evidence of struggle, third-party involvement, weapon use on victim, staged scene indicators.
+   * SUICIDE: self-inflicted injuries, hesitation marks, weapon in decedent's hand, suicide note mentioned, single locus of injury consistent with self-infliction, tool-of-means within reach.
+   * NATURAL: internal pathology (cardiac infarction, stroke, cancer, sepsis, ruptured aneurysm), no traumatic injuries, known medical history consistent with cause.
+   * ACCIDENTAL: motor-vehicle impact with no foul play, unwitnessed fall, drowning without trauma, occupational injury, drug overdose with no indication of self-harm intent.
+   * UNDETERMINED: only when the report genuinely lacks signals or presents ambiguity (e.g. decomposed remains, inconclusive pathology). Prefer the most probable classification when any discriminating signal is present — do not default to UNDETERMINED just because the report is short.
 - injuryPattern: string (clinical description of wound distribution and what it indicates)
 - toxicologyFindings: string (substances found and their significance, or "No significant findings")
-- woundsCount: number (estimated total distinct injuries)
-- confidence: number 0-100 (how confident based on report completeness and clarity)
+- woundsCount: number (count every distinct injury site. Each wound or injury described in its own phrase or list item counts separately. "slit on throat, scratch on thigh" -> 2. "multiple lacerations across torso" -> at least 3. "single gunshot wound to chest" -> 1. Do not collapse multiple sites into one.)
+- confidence: integer 1-100. Calibration: 1-20 for blank/near-empty reports, 21-40 for very brief or informal reports with minimal clinical content, 41-60 for reports with partial findings, 61-85 for detailed clinical reports with clear cause/manner, 86-100 only for complete formal autopsy reports. Never return 0.
 - analysisNotes: string (key forensic observations, methodology notes, caveats)
 - extractedKeywords: string[] (list of forensic terms found: injury types, substances, conditions)
 
@@ -212,13 +619,38 @@ ${livorMortisState ? `Livor mortis state: ${livorMortisState}` : ""}
 Respond with JSON only.`;
 
 	try {
-		const raw = await callClaude(systemPrompt, userMessage, 1024);
+		const raw = await callClaude(
+			systemPrompt,
+			userMessage,
+			1024,
+			"autopsy_analysis",
+		);
 		// Strip markdown code fences if present
 		const cleaned = raw
 			.replace(/^```(?:json)?\n?/i, "")
 			.replace(/\n?```$/i, "")
 			.trim();
 		const parsed = JSON.parse(cleaned);
+
+		// If the model underestimates wounds (or returns 0), cross-check with
+		// heuristic counter so informal reports still tally correctly.
+		const heuristicWounds = countWoundsHeuristic(reportText);
+		const woundsCount = Math.max(parsed.woundsCount ?? 0, heuristicWounds);
+
+		// Confidence: trust the model when it returns a sensible value, but
+		// never surface 0 — fall back to an extraction-completeness heuristic
+		// so the UI communicates "partial" instead of "nothing".
+		const rawConf =
+			typeof parsed.confidence === "number" ? parsed.confidence : NaN;
+		const heuristicConf = computeConfidenceHeuristic(
+			reportText,
+			parsed,
+			woundsCount,
+		);
+		const confidence =
+			rawConf >= 1 && rawConf <= 100
+				? Math.round(Math.max(rawConf, Math.min(heuristicConf, rawConf + 25)))
+				: heuristicConf;
 
 		return {
 			causeOfDeath: parsed.causeOfDeath ?? "Undetermined",
@@ -227,15 +659,15 @@ Respond with JSON only.`;
 			injuryPattern: parsed.injuryPattern ?? "",
 			toxicologyFindings:
 				parsed.toxicologyFindings ?? "No significant findings",
-			woundsCount: parsed.woundsCount ?? 0,
-			confidence: parsed.confidence ?? 50,
+			woundsCount,
+			confidence,
 			analysisNotes: parsed.analysisNotes ?? "",
 			extractedKeywords: parsed.extractedKeywords ?? [],
 			timeOfDeathEstimate,
 		};
 	} catch (err) {
 		// Fallback to heuristic if Claude fails
-		console.error("Claude autopsy analysis failed, using fallback:", err);
+		console.error("LLM autopsy analysis failed, using fallback:", err);
 		return analyzeAutopsyReportFallback(
 			input,
 			postmortemInterval,
@@ -271,15 +703,73 @@ function analyzeAutopsyReportFallback(
 	];
 	for (const t of injuryTerms) if (lower.includes(t)) keywords.push(t);
 
-	const manner =
-		lower.includes("defensive") ||
-		lower.includes("ligature") ||
-		lower.includes("gunshot") ||
-		lower.includes("execution")
-			? "HOMICIDE"
-			: lower.includes("cardiac") || lower.includes("myocardial")
-				? "NATURAL"
-				: "UNDETERMINED";
+	// Wider-spectrum manner classification. Assign points to each category
+	// based on keyword presence and pick the highest; tie-break toward the
+	// more decisive category (HOMICIDE > SUICIDE > ACCIDENTAL > NATURAL).
+	const scores: Record<string, number> = {
+		HOMICIDE: 0,
+		SUICIDE: 0,
+		NATURAL: 0,
+		ACCIDENTAL: 0,
+		UNDETERMINED: 0,
+	};
+	const has = (s: string) => lower.includes(s);
+	if (has("defensive")) scores.HOMICIDE += 3;
+	if (has("ligature") || has("strangulation")) scores.HOMICIDE += 2;
+	if (has("gunshot") || has("gsw")) scores.HOMICIDE += 2;
+	if (has("execution")) scores.HOMICIDE += 3;
+	if (has("multiple wounds") || has("multiple stab") || has("stab wound"))
+		scores.HOMICIDE += 2;
+	if (has("staged") || has("homicide")) scores.HOMICIDE += 3;
+	if (has("assault") || has("beating") || has("bludgeon")) scores.HOMICIDE += 2;
+
+	if (has("self-inflicted") || has("self inflicted")) scores.SUICIDE += 4;
+	if (has("hesitation")) scores.SUICIDE += 3;
+	if (has("suicide note") || has("suicide")) scores.SUICIDE += 3;
+	if (has("in decedent's hand") || has("in own hand")) scores.SUICIDE += 2;
+	if (has("hanging") || has("noose")) scores.SUICIDE += 2;
+	if (has("overdose") && has("intentional")) scores.SUICIDE += 3;
+
+	if (has("cardiac") || has("myocardial") || has("infarction")) scores.NATURAL += 3;
+	if (has("stroke") || has("cerebrovascular")) scores.NATURAL += 3;
+	if (has("aneurysm") || has("sepsis") || has("pneumonia")) scores.NATURAL += 2;
+	if (has("malignancy") || has("cancer") || has("metastatic")) scores.NATURAL += 2;
+	if (has("natural disease") || has("known history")) scores.NATURAL += 2;
+
+	if (has("motor vehicle") || has("collision") || has("traffic accident"))
+		scores.ACCIDENTAL += 3;
+	if (has("drowning") && !has("ligature")) scores.ACCIDENTAL += 2;
+	if (has("fall") || has("fell from") || has("unwitnessed fall"))
+		scores.ACCIDENTAL += 2;
+	if (has("overdose") && !has("intentional")) scores.ACCIDENTAL += 2;
+	if (has("occupational") || has("industrial accident")) scores.ACCIDENTAL += 2;
+	if (has("accidental")) scores.ACCIDENTAL += 3;
+
+	// Generic trauma without discriminators is weak HOMICIDE signal.
+	if (
+		(has("blunt") || has("sharp force") || has("fracture")) &&
+		scores.HOMICIDE === 0 &&
+		scores.SUICIDE === 0 &&
+		scores.ACCIDENTAL === 0
+	)
+		scores.HOMICIDE += 1;
+
+	const TIEBREAK: string[] = [
+		"HOMICIDE",
+		"SUICIDE",
+		"ACCIDENTAL",
+		"NATURAL",
+		"UNDETERMINED",
+	];
+	let winner = "UNDETERMINED";
+	let best = 0;
+	for (const k of TIEBREAK) {
+		if (scores[k] > best) {
+			best = scores[k];
+			winner = k;
+		}
+	}
+	const manner = best === 0 ? "UNDETERMINED" : winner;
 
 	const cause = lower.includes("gunshot")
 		? "Gunshot wound — projectile trauma"
@@ -298,10 +788,10 @@ function analyzeAutopsyReportFallback(
 			lower.includes("ethanol") || lower.includes("benzodiazepine")
 				? "Substances detected — full panel pending"
 				: "No significant findings",
-		woundsCount: Math.max(1, keywords.length),
+		woundsCount: Math.max(1, countWoundsHeuristic(reportText), keywords.length),
 		confidence: 45,
 		analysisNotes:
-			"Fallback heuristic analysis — Claude inference unavailable.",
+			"Fallback heuristic analysis — LLM inference unavailable.",
 		extractedKeywords: keywords,
 		timeOfDeathEstimate,
 	};
@@ -357,7 +847,12 @@ Focus on: timeline gaps, impossible movements, device going offline at critical 
 Respond with JSON only.`;
 
 	try {
-		const raw = await callClaude(systemPrompt, userMessage, 1500);
+		const raw = await callClaude(
+			systemPrompt,
+			userMessage,
+			1500,
+			"digital_correlation",
+		);
 		const cleaned = raw
 			.replace(/^```(?:json)?\n?/i, "")
 			.replace(/\n?```$/i, "")
@@ -386,7 +881,7 @@ Respond with JSON only.`;
 			riskContribution: parsed.riskContribution ?? 0,
 		};
 	} catch (err) {
-		console.error("Claude correlation failed, using fallback:", err);
+		console.error("LLM correlation failed, using fallback:", err);
 		return correlateDigitalEvidenceFallback(input);
 	}
 }
@@ -401,21 +896,139 @@ function correlateDigitalEvidenceFallback(
 		(a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime(),
 	);
 	const anomalies: DigitalCorrelationResult["anomalies"] = [];
+	const patterns: Array<{
+		pattern: string;
+		confidence: number;
+		subjects: string[];
+	}> = [];
 
-	for (let i = 1; i < sorted.length; i++) {
-		const gap =
-			(new Date(sorted[i].timestamp).getTime() -
-				new Date(sorted[i - 1].timestamp).getTime()) /
-			3600000;
-		if (gap > 2 && sorted[i].subject === sorted[i - 1].subject) {
-			anomalies.push({
-				type: "TEMPORAL_GAP",
-				severity: gap > 8 ? "HIGH" : "MEDIUM",
-				description: `${gap.toFixed(1)}h gap in activity for subject "${sorted[i].subject}"`,
-				timestamps: [sorted[i - 1].timestamp, sorted[i].timestamp],
-			});
+	// 1. Temporal gaps per subject
+	const bySubject = new Map<string, typeof sorted>();
+	for (const ev of sorted) {
+		const key = ev.subject || "unknown";
+		const arr = bySubject.get(key) ?? [];
+		arr.push(ev);
+		bySubject.set(key, arr);
+	}
+	for (const [subject, subjectEvents] of bySubject) {
+		for (let i = 1; i < subjectEvents.length; i++) {
+			const gapHours =
+				(new Date(subjectEvents[i].timestamp).getTime() -
+					new Date(subjectEvents[i - 1].timestamp).getTime()) /
+				3600000;
+			if (gapHours > 2) {
+				anomalies.push({
+					type: "TEMPORAL_GAP",
+					severity: gapHours > 8 ? "HIGH" : "MEDIUM",
+					description: `${gapHours.toFixed(1)}h gap in activity for subject "${subject}"`,
+					timestamps: [
+						subjectEvents[i - 1].timestamp,
+						subjectEvents[i].timestamp,
+					],
+				});
+			}
 		}
 	}
+
+	// 2. Event bursts (>=3 events within 30 min)
+	for (let i = 0; i < sorted.length; i++) {
+		const windowStart = new Date(sorted[i].timestamp).getTime();
+		let count = 1;
+		const ts: string[] = [sorted[i].timestamp];
+		for (let j = i + 1; j < sorted.length; j++) {
+			const delta =
+				(new Date(sorted[j].timestamp).getTime() - windowStart) / 60000;
+			if (delta <= 30) {
+				count++;
+				ts.push(sorted[j].timestamp);
+			} else break;
+		}
+		if (count >= 3) {
+			anomalies.push({
+				type: "COORDINATED_ACTION",
+				severity: count >= 5 ? "HIGH" : "MEDIUM",
+				description: `${count} digital events within a 30-minute window — possible coordinated activity.`,
+				timestamps: ts,
+			});
+			i += count - 1;
+		}
+	}
+
+	// 3. High-anomaly flagged records from ingestion metadata
+	const highAnomalyEvents = sorted.filter(
+		(e) => typeof e.anomalyScore === "number" && e.anomalyScore > 70,
+	);
+	if (highAnomalyEvents.length > 0) {
+		anomalies.push({
+			type: "SUSPICIOUS_ACTIVITY",
+			severity: highAnomalyEvents.some((e) => (e.anomalyScore ?? 0) >= 90)
+				? "CRITICAL"
+				: "HIGH",
+			description: `${highAnomalyEvents.length} record${
+				highAnomalyEvents.length === 1 ? "" : "s"
+			} flagged with anomaly score > 70 at ingestion.`,
+			timestamps: highAnomalyEvents.map((e) => e.timestamp),
+		});
+	}
+
+	// 4. Source diversity pattern
+	const types = new Set(sorted.map((e) => e.sourceType));
+	if (types.size >= 3) {
+		patterns.push({
+			pattern: `Multi-source digital footprint across ${types.size} channels (${Array.from(
+				types,
+			).join(", ")})`,
+			confidence: Math.min(90, 50 + types.size * 10),
+			subjects: Array.from(new Set(sorted.map((e) => e.subject).filter(Boolean))),
+		});
+	}
+
+	// 5. Recurring subjects pattern
+	const subjectCounts = new Map<string, number>();
+	for (const e of sorted) {
+		if (!e.subject) continue;
+		subjectCounts.set(e.subject, (subjectCounts.get(e.subject) ?? 0) + 1);
+	}
+	const repeated = Array.from(subjectCounts.entries())
+		.filter(([, n]) => n >= 2)
+		.sort((a, b) => b[1] - a[1]);
+	if (repeated.length > 0) {
+		patterns.push({
+			pattern: `Repeated subject${repeated.length === 1 ? "" : "s"}: ${repeated
+				.slice(0, 3)
+				.map(([s, n]) => `${s} (${n})`)
+				.join(", ")}`,
+			confidence: 70,
+			subjects: repeated.map(([s]) => s),
+		});
+	}
+
+	// 6. Night-time activity cluster (22:00–04:00)
+	const nightEvents = sorted.filter((e) => {
+		const hour = new Date(e.timestamp).getUTCHours();
+		return hour >= 22 || hour < 4;
+	});
+	if (nightEvents.length >= 2 && nightEvents.length / sorted.length > 0.4) {
+		patterns.push({
+			pattern: `Concentrated overnight activity (${nightEvents.length}/${sorted.length} events between 22:00–04:00 UTC)`,
+			confidence: 65,
+			subjects: Array.from(new Set(nightEvents.map((e) => e.subject))),
+		});
+	}
+
+	// Risk contribution: scales with anomaly count and severity
+	let risk = 0;
+	for (const a of anomalies) {
+		risk +=
+			a.severity === "CRITICAL"
+				? 25
+				: a.severity === "HIGH"
+					? 15
+					: a.severity === "MEDIUM"
+						? 8
+						: 3;
+	}
+	risk = Math.min(100, risk);
 
 	return {
 		anomalies,
@@ -423,10 +1036,13 @@ function correlateDigitalEvidenceFallback(
 			timestamp: ev.timestamp,
 			event: ev.description,
 			source: `${ev.sourceType} — ${ev.subject}`,
-			significance: "NORMAL",
+			significance:
+				anomalies.some((a) => a.timestamps.includes(ev.timestamp))
+					? "FLAGGED"
+					: "NORMAL",
 		})),
-		patterns: [],
-		riskContribution: anomalies.length * 10,
+		patterns,
+		riskContribution: risk,
 	};
 }
 
@@ -452,36 +1068,70 @@ export function estimateTod(input: TodInput): TodResult {
 		livorRange,
 	]);
 
-	const finalMin = combined.min;
+	let finalMin = combined.min;
 	let finalMax = combined.max;
 	let lastSeenNote = "";
+	let conflict = false;
 
 	if (lastSeenAlive) {
 		const hoursSinceLastSeen =
 			(new Date().getTime() - new Date(lastSeenAlive).getTime()) / 3600000;
-		if (finalMax > hoursSinceLastSeen) {
-			finalMax = Math.min(finalMax, hoursSinceLastSeen);
-			lastSeenNote = ` Upper bound constrained by last-seen-alive (${lastSeenAlive}).`;
+		if (Number.isFinite(hoursSinceLastSeen) && hoursSinceLastSeen >= 0) {
+			if (hoursSinceLastSeen < finalMin) {
+				// Contradiction: post-mortem signs imply death *before* the
+				// reported last-seen-alive. Flag it, widen window around the LSA.
+				conflict = true;
+				lastSeenNote =
+					` Conflict: forensic signs suggest TOD earlier than last-seen-alive ` +
+					`(${lastSeenAlive}). Last-seen-alive likely inaccurate or the ` +
+					`rigor/livor observations need re-evaluation.`;
+				finalMin = Math.max(0, hoursSinceLastSeen - 2);
+				finalMax = hoursSinceLastSeen;
+			} else if (hoursSinceLastSeen < finalMax) {
+				// Normal case: LSA tightens the upper bound.
+				finalMax = hoursSinceLastSeen;
+				lastSeenNote =
+					` Upper bound constrained by last-seen-alive (${lastSeenAlive}).`;
+			}
 		}
+	}
+
+	// Guarantee a non-degenerate window. If the constraints collapsed to a
+	// single point (or inverted), expand outward by a minimum ±1h band and
+	// penalise confidence — a zero-width TOD estimate is physically implausible.
+	let collapsed = false;
+	const MIN_SPREAD = 2; // hours
+	if (finalMax - finalMin < MIN_SPREAD) {
+		collapsed = true;
+		const mid = (finalMin + finalMax) / 2;
+		finalMin = Math.max(0, mid - MIN_SPREAD / 2);
+		finalMax = mid + MIN_SPREAD / 2;
 	}
 
 	const centralHours = (finalMin + finalMax) / 2;
 	let confidenceLevel = 70;
 	const rangeWidth = finalMax - finalMin;
-	if (rangeWidth < 4) confidenceLevel += 15;
-	else if (rangeWidth < 8) confidenceLevel += 8;
+	// Genuinely narrow (but not collapsed) windows still signal confidence.
+	if (!collapsed && rangeWidth < 4) confidenceLevel += 15;
+	else if (!collapsed && rangeWidth < 8) confidenceLevel += 8;
 	else if (rangeWidth > 20) confidenceLevel -= 15;
 	if (bodyTemp > ambientTemp + 2) confidenceLevel += 5;
-	if (lastSeenAlive) confidenceLevel += 5;
-	confidenceLevel = Math.min(95, Math.max(30, confidenceLevel));
+	if (lastSeenAlive && !conflict) confidenceLevel += 5;
+	if (collapsed) confidenceLevel -= 20;
+	if (conflict) confidenceLevel -= 20;
+	confidenceLevel = Math.min(95, Math.max(25, confidenceLevel));
 
 	const methodology =
 		`Henssge nomogram: body ${bodyTemp}°C, ambient ${ambientTemp}°C (${weight}kg). ` +
 		`k=${(0.05 * Math.sqrt(70 / weight)).toFixed(3)}/hr. Temp PMI: ${tempEstimate.hours}h ` +
-		`(${tempEstimate.range[0]}–${tempEstimate.range[1]}h). ` +
-		`Rigor stage ${rigorMortisStage} → ${rigorRange.min}–${rigorRange.max}h. ` +
-		`Livor (${livorMortisState}) → ${livorRange.min}–${livorRange.max}h. ` +
-		`Intersected: ${Math.round(finalMin)}–${Math.round(finalMax)}h PMI.${lastSeenNote}`;
+		`(${tempEstimate.range[0]}-${tempEstimate.range[1]}h). ` +
+		`Rigor stage ${rigorMortisStage} -> ${rigorRange.min}-${rigorRange.max}h. ` +
+		`Livor (${livorMortisState}) -> ${livorRange.min}-${livorRange.max}h. ` +
+		`Intersected: ${Math.round(finalMin)}-${Math.round(finalMax)}h PMI.` +
+		(collapsed
+			? ` (Expanded from a collapsed window; treat as low confidence.)`
+			: "") +
+		lastSeenNote;
 
 	return {
 		estimatedTodEarliest: hoursToIso(now, finalMax),
@@ -490,9 +1140,15 @@ export function estimateTod(input: TodInput): TodResult {
 		confidenceLevel,
 		methodology,
 		notes:
-			`PMI: ${Math.round(finalMin)}–${Math.round(finalMax)}h. Central: ${Math.round(centralHours)}h ago. ` +
+			`PMI: ${Math.round(finalMin)}-${Math.round(finalMax)}h. Central: ${Math.round(centralHours)}h ago. ` +
 			(lastSeenAlive ? `Last seen: ${lastSeenAlive}. ` : "") +
-			`Confidence: ${confidenceLevel}%. Environmental factors may shift ±20%.`,
+			`Confidence: ${confidenceLevel}%.` +
+			(conflict
+				? " Signals conflict with last-seen-alive."
+				: collapsed
+					? " Window collapsed; widened to 2h minimum."
+					: "") +
+			` Environmental factors may shift +/-20%.`,
 		pmhHours: {
 			min: Math.round(finalMin * 10) / 10,
 			max: Math.round(finalMax * 10) / 10,

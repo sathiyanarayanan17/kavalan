@@ -7,7 +7,7 @@ import AppShell from "@/components/layout/AppShell";
 import Sidebar from "@/components/layout/Sidebar";
 import TopBar from "@/components/layout/TopBar";
 import { RiskBadge } from "@/components/ui/RiskBadge";
-import { StatusStamp } from "@/components/ui/StatusStamp";
+import { CaseStatusControl } from "@/components/cases/CaseStatusControl";
 import type { Case } from "@/types";
 
 const TABS = [
@@ -86,7 +86,13 @@ export default function CaseWorkspaceLayout({
 				actions={
 					<div className="flex items-center gap-2">
 						<RiskBadge level={caseData.riskLevel} score={caseData.riskScore} />
-						<StatusStamp status={caseData.status} />
+						<CaseStatusControl
+							caseId={caseData.id}
+							status={caseData.status}
+							onChanged={(next) =>
+								setCaseData((c) => (c ? { ...c, status: next } : c))
+							}
+						/>
 					</div>
 				}
 			/>

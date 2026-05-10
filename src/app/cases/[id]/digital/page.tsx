@@ -14,21 +14,23 @@ export default function DigitalPage() {
 	const [loading, setLoading] = useState(true);
 	const [error, setError] = useState<string | null>(null);
 
-	useEffect(() => {
+	const load = async () => {
 		if (!id) return;
-		const load = async () => {
-			try {
-				const res = await fetch(`/api/cases/${id}`);
-				if (!res.ok) throw new Error("Failed to load case");
-				const data = await res.json();
-				setDigitalEvidence(data.digitalEvidence ?? []);
-			} catch (err) {
-				setError(err instanceof Error ? err.message : "Unknown error");
-			} finally {
-				setLoading(false);
-			}
-		};
+		try {
+			const res = await fetch(`/api/cases/${id}`);
+			if (!res.ok) throw new Error("Failed to load case");
+			const data = await res.json();
+			setDigitalEvidence(data.digitalEvidence ?? []);
+		} catch (err) {
+			setError(err instanceof Error ? err.message : "Unknown error");
+		} finally {
+			setLoading(false);
+		}
+	};
+
+	useEffect(() => {
 		load();
+		// eslint-disable-next-line react-hooks/exhaustive-deps
 	}, [id]);
 
 	if (loading) {
@@ -64,7 +66,7 @@ export default function DigitalPage() {
 			animate={{ opacity: 1, y: 0 }}
 			transition={{ duration: 0.2, ease: "easeOut" }}
 		>
-			<DigitalPanel caseId={id} digitalEvidence={digitalEvidence} />
+			<DigitalPanel caseId={id} digitalEvidence={digitalEvidence} onRefresh={load} />
 		</motion.div>
 	);
 }

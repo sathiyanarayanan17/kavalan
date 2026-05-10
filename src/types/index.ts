@@ -44,6 +44,7 @@ export interface Evidence {
 	analyst: string;
 	notes: string;
 	confidence: number;
+	imagePath?: string;
 }
 
 export interface AutopsyReport {
@@ -75,6 +76,7 @@ export interface TodEstimate {
 	lastSeenAlive: string;
 	estimatedTodEarliest: string;
 	estimatedTodLatest: string;
+	centralEstimate?: string;
 	confidenceLevel: number;
 	methodology: string;
 	notes: string;

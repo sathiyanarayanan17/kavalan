@@ -48,6 +48,8 @@
 	--critical: var(--crimson);
 	--critical-bg: var(--crimson-bg);
 	--high: var(--amber);
+	--medium: var(--sky);
+	--low: var(--sage);
 }
 
 /* ─── Base Reset ─────────────────────────────────────────────────────────── */

@@ -16,9 +16,41 @@ export async function POST(request: NextRequest) {
 			livorMortisState,
 		} = body;
 
-		if (!caseId || !reportText)
+		const trimmedReport =
+			typeof reportText === "string" ? reportText.trim() : "";
+
+		if (!caseId)
 			return NextResponse.json(
-				{ error: "caseId and reportText are required" },
+				{ error: "caseId is required" },
+				{ status: 400 },
+			);
+		if (!trimmedReport)
+			return NextResponse.json(
+				{ error: "Report text is empty. Paste the autopsy report before running analysis." },
+				{ status: 400 },
+			);
+
+		// Physical plausibility bounds for optional temperature inputs.
+		if (
+			bodyTemperature !== undefined &&
+			bodyTemperature !== null &&
+			(!Number.isFinite(bodyTemperature) ||
+				bodyTemperature < 0 ||
+				bodyTemperature > 42)
+		)
+			return NextResponse.json(
+				{ error: "bodyTemperature must be between 0 and 42 °C" },
+				{ status: 400 },
+			);
+		if (
+			ambientTemperature !== undefined &&
+			ambientTemperature !== null &&
+			(!Number.isFinite(ambientTemperature) ||
+				ambientTemperature < -40 ||
+				ambientTemperature > 60)
+		)
+			return NextResponse.json(
+				{ error: "ambientTemperature must be between -40 and 60 °C" },
 				{ status: 400 },
 			);
 
@@ -26,7 +58,7 @@ export async function POST(request: NextRequest) {
 			return NextResponse.json({ error: "Case not found" }, { status: 404 });
 
 		const result = await analyzeAutopsyReport({
-			reportText,
+			reportText: trimmedReport,
 			bodyTemperature,
 			ambientTemperature,
 			rigorMortisStage,
@@ -46,32 +78,32 @@ export async function POST(request: NextRequest) {
          $injuryPattern,$toxicologyFindings,$woundsCount,$bodyTemperature,$rigorMortisStage,
          $livorMortisState,$confidence,$analysisNotes)
     `).run({
-			$id: id,
-			$caseId: caseId,
-			$rawReport: reportText,
-			$analyzedAt: analyzedAt,
-			$causeOfDeath: result.causeOfDeath,
-			$mannerOfDeath: result.mannerOfDeath,
-			$postmortemInterval: result.postmortemInterval,
-			$injuryPattern: result.injuryPattern,
-			$toxicologyFindings: result.toxicologyFindings,
-			$woundsCount: result.woundsCount,
-			$bodyTemperature: bodyTemperature ?? 0,
-			$rigorMortisStage: rigorMortisStage ?? 0,
-			$livorMortisState: livorMortisState ?? "",
-			$confidence: result.confidence,
-			$analysisNotes: result.analysisNotes,
+			id: id,
+			caseId: caseId,
+			rawReport: trimmedReport,
+			analyzedAt: analyzedAt,
+			causeOfDeath: result.causeOfDeath,
+			mannerOfDeath: result.mannerOfDeath,
+			postmortemInterval: result.postmortemInterval,
+			injuryPattern: result.injuryPattern,
+			toxicologyFindings: result.toxicologyFindings,
+			woundsCount: result.woundsCount,
+			bodyTemperature: bodyTemperature ?? 0,
+			rigorMortisStage: rigorMortisStage ?? 0,
+			livorMortisState: livorMortisState ?? "",
+			confidence: result.confidence,
+			analysisNotes: result.analysisNotes,
 		});
 
 		db.prepare(
 			`INSERT INTO case_activities (id,caseId,type,description,createdAt,agent) VALUES ($id,$caseId,$type,$description,$createdAt,$agent)`,
 		).run({
-			$id: `act-${randomUUID().slice(0, 8)}`,
-			$caseId: caseId,
-			$type: "ANALYSIS_RUN",
-			$description: `Autopsy analyzed. COD: ${result.causeOfDeath}. Manner: ${result.mannerOfDeath}.`,
-			$createdAt: analyzedAt,
-			$agent: "KAVALAN AI Engine",
+			id: `act-${randomUUID().slice(0, 8)}`,
+			caseId: caseId,
+			type: "ANALYSIS_RUN",
+			description: `Autopsy analyzed. COD: ${result.causeOfDeath}. Manner: ${result.mannerOfDeath}.`,
+			createdAt: analyzedAt,
+			agent: "KAVALAN AI Engine",
 		});
 
 		return NextResponse.json({ id, caseId, analyzedAt, ...result });

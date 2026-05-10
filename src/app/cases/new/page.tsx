@@ -207,7 +207,11 @@ export default function NewCasePage() {
 						</div>
 
 						<div className="mt-6">
-							<Button variant="primary" disabled={submitting}>
+							<Button
+								type="submit"
+								variant="primary"
+								disabled={submitting}
+							>
 								{submitting ? "OPENING FILE..." : "OPEN INVESTIGATION FILE"}
 							</Button>
 						</div>

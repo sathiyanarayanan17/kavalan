@@ -2,6 +2,7 @@ export const dynamic = "force-dynamic";
 import { type NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { randomUUID } from "crypto";
+import { geocode } from "@/lib/geocoder";
 
 export async function GET(request: NextRequest) {
 	try {
@@ -52,21 +53,21 @@ export async function POST(request: NextRequest) {
 		const dateCreated = new Date().toISOString();
 
 		const newCase = {
-			$id: id,
-			$caseRef: caseRef,
-			$title: body.title ?? "Untitled Case",
-			$description: body.description ?? "",
-			$status: body.status ?? "OPEN",
-			$riskLevel: body.riskLevel ?? "LOW",
-			$riskScore: body.riskScore ?? 0,
-			$location: body.location ?? "",
-			$dateCreated: dateCreated,
-			$dateOfIncident: body.dateOfIncident ?? dateCreated,
-			$assignedAgent: body.assignedAgent ?? "",
-			$suspectCount: body.suspectCount ?? 0,
-			$evidenceCount: 0,
-			$victimName: body.victimName ?? "",
-			$tags: Array.isArray(body.tags)
+			id: id,
+			caseRef: caseRef,
+			title: body.title ?? "Untitled Case",
+			description: body.description ?? "",
+			status: body.status ?? "OPEN",
+			riskLevel: body.riskLevel ?? "LOW",
+			riskScore: body.riskScore ?? 0,
+			location: body.location ?? "",
+			dateCreated: dateCreated,
+			dateOfIncident: body.dateOfIncident ?? dateCreated,
+			assignedAgent: body.assignedAgent ?? "",
+			suspectCount: body.suspectCount ?? 0,
+			evidenceCount: 0,
+			victimName: body.victimName ?? "",
+			tags: Array.isArray(body.tags)
 				? JSON.stringify(body.tags)
 				: (body.tags ?? "[]"),
 		};
@@ -79,6 +80,30 @@ export async function POST(request: NextRequest) {
         ($id,$caseRef,$title,$description,$status,$riskLevel,$riskScore,$location,
          $dateCreated,$dateOfIncident,$assignedAgent,$suspectCount,$evidenceCount,$victimName,$tags)
     `).run(newCase);
+
+		// Auto-geocode the case location so it appears on the Intel Map
+		// immediately. Failures are non-fatal — user can retry from /map.
+		if (newCase.location && newCase.location.trim().length >= 3) {
+			try {
+				const hit = await geocode(newCase.location);
+				if (hit) {
+					db.prepare(
+						"UPDATE cases SET lat = $lat, lng = $lng, geocodedAt = $geocodedAt WHERE id = $id",
+					).run({
+						id,
+						lat: hit.lat,
+						lng: hit.lng,
+						geocodedAt: new Date().toISOString(),
+					});
+				}
+			} catch (err) {
+				console.warn(
+					"auto-geocode failed for",
+					newCase.location,
+					(err as Error).message,
+				);
+			}
+		}
 
 		const created = db.prepare("SELECT * FROM cases WHERE id = ?").get(id);
 		return NextResponse.json(created, { status: 201 });

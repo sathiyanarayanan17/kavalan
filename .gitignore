@@ -3,3 +3,6 @@ node_modules/
 data/
 *.tar.gz
 .env.local
+.env.*.local
+tsconfig.tsbuildinfo
+*.log

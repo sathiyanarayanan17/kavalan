@@ -11,7 +11,9 @@ export function ConfidenceBar({
 	showLabel = false,
 	className = "",
 }: ConfidenceBarProps) {
-	const pct = Math.max(0, Math.min(100, value));
+	// Accept either 0-1 fractions (e.g. 0.77) or 0-100 percentages (e.g. 77).
+	const normalised = value <= 1 ? value * 100 : value;
+	const pct = Math.max(0, Math.min(100, Math.round(normalised)));
 	let fillColor: string;
 	if (pct >= 70) {
 		fillColor = "var(--amber)";

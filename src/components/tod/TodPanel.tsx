@@ -94,6 +94,36 @@ export function TodPanel({ caseId, existingEstimate }: TodPanelProps) {
 
 	async function handleSubmit(e: React.FormEvent) {
 		e.preventDefault();
+
+		// Client-side physical-plausibility validation.
+		const bt = parseFloat(form.bodyTemp);
+		const at = parseFloat(form.ambientTemp);
+		const wt = parseFloat(form.bodyWeight);
+		if (!Number.isFinite(bt) || bt < 0 || bt > 42) {
+			setError(
+				"Body temperature must be between 0 and 42 °C. A body cannot sustain a temperature outside this range.",
+			);
+			return;
+		}
+		if (!Number.isFinite(at) || at < -40 || at > 60) {
+			setError(
+				"Ambient temperature must be between -40 and 60 °C (realistic environmental range).",
+			);
+			return;
+		}
+		if (form.bodyWeight && (!Number.isFinite(wt) || wt < 2 || wt > 300)) {
+			setError(
+				"Body weight must be between 2 and 300 kg. Leave blank to use the 70 kg default.",
+			);
+			return;
+		}
+		if (bt <= at) {
+			setError(
+				"Body temperature is at or below ambient — Henssge cooling cannot produce an estimate. The body must be warmer than the environment for meaningful PMI from cooling.",
+			);
+			return;
+		}
+
 		setLoading(true);
 		setError(null);
 		try {
@@ -102,9 +132,9 @@ export function TodPanel({ caseId, existingEstimate }: TodPanelProps) {
 				headers: { "Content-Type": "application/json" },
 				body: JSON.stringify({
 					caseId,
-					bodyTemp: parseFloat(form.bodyTemp) || null,
-					ambientTemp: parseFloat(form.ambientTemp) || null,
-					bodyWeight: parseFloat(form.bodyWeight) || 70,
+					bodyTemp: bt,
+					ambientTemp: at,
+					weight: Number.isFinite(wt) && wt > 0 ? wt : 70,
 					rigorMortisStage: parseInt(form.rigorMortisStage, 10),
 					livorMortisState: form.livorMortisState,
 					lastSeenAlive: form.lastSeenAlive || null,
@@ -143,10 +173,13 @@ export function TodPanel({ caseId, existingEstimate }: TodPanelProps) {
 								name="bodyTemp"
 								type="number"
 								step="0.1"
+								min="0"
+								max="42"
 								value={form.bodyTemp}
 								onChange={handleChange}
 								className={inputClass}
-								placeholder="e.g. 28.5"
+								placeholder="0-42 °C"
+								title="Body temperature at scene, in degrees Celsius. Valid range 0-42 °C."
 							/>
 						</div>
 						<div>
@@ -158,10 +191,13 @@ export function TodPanel({ caseId, existingEstimate }: TodPanelProps) {
 								name="ambientTemp"
 								type="number"
 								step="0.1"
+								min="-40"
+								max="60"
 								value={form.ambientTemp}
 								onChange={handleChange}
 								className={inputClass}
-								placeholder="e.g. 20.0"
+								placeholder="-40 to 60 °C"
+								title="Ambient environmental temperature, in degrees Celsius. Valid range -40 to 60 °C."
 							/>
 						</div>
 					</div>
@@ -175,10 +211,13 @@ export function TodPanel({ caseId, existingEstimate }: TodPanelProps) {
 							name="bodyWeight"
 							type="number"
 							step="0.1"
+							min="2"
+							max="300"
 							value={form.bodyWeight}
 							onChange={handleChange}
 							className={inputClass}
-							placeholder="Default: 70"
+							placeholder="2-300 kg (default 70)"
+							title="Body weight, in kilograms. Valid range 2-300 kg."
 						/>
 					</div>
 
@@ -323,7 +362,9 @@ export function TodPanel({ caseId, existingEstimate }: TodPanelProps) {
 										Central Estimate
 									</div>
 									<div className="font-mono text-base text-data">
-										{formatDateTime(result.estimatedAt)}
+										{formatDateTime(
+											result.centralEstimate || result.estimatedAt,
+										)}
 									</div>
 								</div>
 							</div>

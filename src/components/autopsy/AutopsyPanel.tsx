@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { FileText } from "lucide-react";
 import type { AutopsyReport } from "@/types";
@@ -83,6 +83,137 @@ export function AutopsyPanel({ caseId, existingReport }: AutopsyPanelProps) {
 		existingReport ?? null,
 	);
 
+	// Upload extraction state
+	const [extracting, setExtracting] = useState<"image" | "csv" | null>(null);
+	const [extractStatus, setExtractStatus] = useState<string | null>(null);
+
+	// Draft state
+	const [savingDraft, setSavingDraft] = useState(false);
+	const [draftStatus, setDraftStatus] = useState<string | null>(null);
+	const [draftRestored, setDraftRestored] = useState(false);
+
+	// On mount, if the case has a saved draft newer than the existing report,
+	// prefill from the draft.
+	useEffect(() => {
+		let cancelled = false;
+		async function loadDraft() {
+			try {
+				const res = await fetch(`/api/cases/${caseId}/autopsy-draft`);
+				if (!res.ok) return;
+				const data = await res.json();
+				if (cancelled || !data.draft) return;
+
+				// Only prefill from draft if there's no existing report that's
+				// already populated the form, OR the draft has content the user
+				// hasn't analysed yet.
+				const draft = data.draft;
+				const draftIsMoreRecent =
+					!existingReport ||
+					(draft.savedAt &&
+						new Date(draft.savedAt).getTime() >
+							new Date(existingReport.analyzedAt).getTime());
+				if (!draftIsMoreRecent) return;
+
+				setForm({
+					rawReport: draft.rawReport ?? "",
+					bodyTemperature: draft.bodyTemperature ?? "",
+					ambientTemperature: draft.ambientTemperature ?? "",
+					rigorMortisStage: draft.rigorMortisStage ?? "0",
+					livorMortisState: draft.livorMortisState ?? "not_present",
+				});
+				setDraftRestored(true);
+				setDraftStatus(
+					`Draft restored (saved ${new Date(draft.savedAt).toLocaleString()}).`,
+				);
+			} catch {
+				/* noop */
+			}
+		}
+		loadDraft();
+		return () => {
+			cancelled = true;
+		};
+		// eslint-disable-next-line react-hooks/exhaustive-deps
+	}, [caseId]);
+
+	async function saveDraft() {
+		setSavingDraft(true);
+		setDraftStatus(null);
+		setError(null);
+		try {
+			const res = await fetch(`/api/cases/${caseId}/autopsy-draft`, {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify(form),
+			});
+			const data = await res.json().catch(() => ({}));
+			if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`);
+			setDraftStatus(
+				`Draft saved at ${new Date(data.savedAt).toLocaleTimeString()}.`,
+			);
+		} catch (err) {
+			setError(err instanceof Error ? err.message : "Draft save failed");
+		} finally {
+			setSavingDraft(false);
+		}
+	}
+
+	async function handleImageUpload(e: React.ChangeEvent<HTMLInputElement>) {
+		const file = e.target.files?.[0];
+		e.target.value = "";
+		if (!file) return;
+		setExtracting("image");
+		setError(null);
+		setExtractStatus(`Transcribing ${file.name}...`);
+		try {
+			const fd = new FormData();
+			fd.append("image", file);
+			const res = await fetch("/api/analyze/autopsy/extract-image", {
+				method: "POST",
+				body: fd,
+			});
+			const data = await res.json().catch(() => ({}));
+			if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`);
+			setForm((f) => ({ ...f, rawReport: data.text }));
+			setExtractStatus(
+				`Transcribed ${file.name} (${Math.round(file.size / 1024)} KB). Review and click Run Analysis.`,
+			);
+		} catch (err) {
+			setError(err instanceof Error ? err.message : "Image extraction failed");
+			setExtractStatus(null);
+		} finally {
+			setExtracting(null);
+		}
+	}
+
+	async function handleCsvUpload(e: React.ChangeEvent<HTMLInputElement>) {
+		const file = e.target.files?.[0];
+		e.target.value = "";
+		if (!file) return;
+		setExtracting("csv");
+		setError(null);
+		setExtractStatus(`Parsing ${file.name}...`);
+		try {
+			const fd = new FormData();
+			fd.append("csv", file);
+			const res = await fetch("/api/analyze/autopsy/extract-csv", {
+				method: "POST",
+				body: fd,
+			});
+			const data = await res.json().catch(() => ({}));
+			if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`);
+			setForm((f) => ({ ...f, rawReport: data.text }));
+			setExtractStatus(
+				`Parsed ${file.name} (${data.rowsParsed} rows). Review and click Run Analysis.`,
+			);
+		} catch (err) {
+			setError(err instanceof Error ? err.message : "CSV extraction failed");
+			setExtractStatus(null);
+		} finally {
+			setExtracting(null);
+		}
+	}
+
 	function handleChange(
 		e: React.ChangeEvent<
 			HTMLTextAreaElement | HTMLInputElement | HTMLSelectElement
@@ -93,6 +224,30 @@ export function AutopsyPanel({ caseId, existingReport }: AutopsyPanelProps) {
 
 	async function handleSubmit(e: React.FormEvent) {
 		e.preventDefault();
+		const trimmed = form.rawReport.trim();
+		if (!trimmed) {
+			setError("Paste the autopsy report before running analysis.");
+			return;
+		}
+
+		// Validate optional temperature fields if the user filled them in.
+		const bt = form.bodyTemperature.trim();
+		const at = form.ambientTemperature.trim();
+		if (bt) {
+			const n = parseFloat(bt);
+			if (!Number.isFinite(n) || n < 0 || n > 42) {
+				setError("Body temperature must be between 0 and 42 °C (or left blank).");
+				return;
+			}
+		}
+		if (at) {
+			const n = parseFloat(at);
+			if (!Number.isFinite(n) || n < -40 || n > 60) {
+				setError("Ambient temperature must be between -40 and 60 °C (or left blank).");
+				return;
+			}
+		}
+
 		setLoading(true);
 		setError(null);
 		try {
@@ -101,9 +256,9 @@ export function AutopsyPanel({ caseId, existingReport }: AutopsyPanelProps) {
 				headers: { "Content-Type": "application/json" },
 				body: JSON.stringify({
 					caseId,
-					reportText: form.rawReport,
-					bodyTemperature: parseFloat(form.bodyTemperature) || null,
-					ambientTemperature: parseFloat(form.ambientTemperature) || null,
+					reportText: trimmed,
+					bodyTemperature: bt ? parseFloat(bt) : null,
+					ambientTemperature: at ? parseFloat(at) : null,
 					rigorMortisStage: parseInt(form.rigorMortisStage, 10),
 					livorMortisState: form.livorMortisState,
 				}),
@@ -131,6 +286,39 @@ export function AutopsyPanel({ caseId, existingReport }: AutopsyPanelProps) {
 					Autopsy Analysis Input
 				</div>
 				<form onSubmit={handleSubmit} className="flex flex-col gap-3 flex-1">
+					<div className="flex items-center gap-2 flex-wrap">
+						<label
+							className="font-mono text-[10px] uppercase tracking-widest px-3 py-1.5 border border-border-DEFAULT text-muted hover:text-data cursor-pointer"
+							style={{ borderRadius: 0 }}
+						>
+							{extracting === "image" ? "Transcribing..." : "Upload Image"}
+							<input
+								type="file"
+								accept="image/png,image/jpeg,image/webp,image/gif"
+								onChange={handleImageUpload}
+								disabled={extracting !== null || loading}
+								className="hidden"
+							/>
+						</label>
+						<label
+							className="font-mono text-[10px] uppercase tracking-widest px-3 py-1.5 border border-border-DEFAULT text-muted hover:text-data cursor-pointer"
+							style={{ borderRadius: 0 }}
+						>
+							{extracting === "csv" ? "Parsing..." : "Upload CSV"}
+							<input
+								type="file"
+								accept=".csv,text/csv,text/plain"
+								onChange={handleCsvUpload}
+								disabled={extracting !== null || loading}
+								className="hidden"
+							/>
+						</label>
+						{extractStatus && (
+							<span className="font-mono text-[10px] text-sage flex-1">
+								{extractStatus}
+							</span>
+						)}
+					</div>
 					<div>
 						<label className={labelClass} htmlFor="rawReport">
 							Raw Report Text
@@ -140,10 +328,10 @@ export function AutopsyPanel({ caseId, existingReport }: AutopsyPanelProps) {
 							name="rawReport"
 							value={form.rawReport}
 							onChange={handleChange}
-							placeholder="Paste complete autopsy report..."
+							placeholder="Paste complete autopsy report, or use Upload Image / Upload CSV above to populate this field."
 							className={`${inputClass} resize-y`}
 							style={{
-								minHeight: 300,
+								minHeight: 280,
 								fontFamily: "'JetBrains Mono', monospace",
 							}}
 						/>
@@ -159,10 +347,13 @@ export function AutopsyPanel({ caseId, existingReport }: AutopsyPanelProps) {
 								name="bodyTemperature"
 								type="number"
 								step="0.1"
+								min="0"
+								max="42"
 								value={form.bodyTemperature}
 								onChange={handleChange}
 								className={inputClass}
-								placeholder="e.g. 28.5"
+								placeholder="0-42 °C"
+								title="Body temperature at scene, in degrees Celsius. Valid range 0-42 °C."
 							/>
 						</div>
 						<div>
@@ -174,10 +365,13 @@ export function AutopsyPanel({ caseId, existingReport }: AutopsyPanelProps) {
 								name="ambientTemperature"
 								type="number"
 								step="0.1"
+								min="-40"
+								max="60"
 								value={form.ambientTemperature}
 								onChange={handleChange}
 								className={inputClass}
-								placeholder="e.g. 20.0"
+								placeholder="-40 to 60 °C"
+								title="Ambient environmental temperature, in degrees Celsius. Valid range -40 to 60 °C."
 							/>
 						</div>
 					</div>
@@ -226,14 +420,40 @@ export function AutopsyPanel({ caseId, existingReport }: AutopsyPanelProps) {
 						</div>
 					)}
 
-					<button
-						type="submit"
-						disabled={loading}
-						className="w-full mt-auto font-mono text-xs uppercase tracking-widest px-4 py-2.5 bg-amber text-base border border-amber disabled:opacity-50 disabled:cursor-not-allowed"
-						style={{ color: "var(--bg)", borderRadius: 0 }}
-					>
-						{loading ? "Processing..." : "Run Analysis"}
-					</button>
+					{draftStatus && !error && (
+						<div
+							className="font-mono text-[10px] px-3 py-2 border"
+							style={{
+								borderColor: draftRestored
+									? "var(--sky)"
+									: "var(--sage)",
+								color: draftRestored ? "var(--sky)" : "var(--sage)",
+							}}
+						>
+							{draftStatus}
+						</div>
+					)}
+
+					<div className="flex items-center gap-2 mt-auto">
+						<button
+							type="button"
+							onClick={saveDraft}
+							disabled={savingDraft || loading}
+							className="flex-1 font-mono text-xs uppercase tracking-widest px-4 py-2.5 border border-border-DEFAULT text-data hover:border-amber hover:text-amber disabled:opacity-50 disabled:cursor-not-allowed"
+							style={{ borderRadius: 0 }}
+							title="Save the current inputs to this case without running analysis. You can return and edit later."
+						>
+							{savingDraft ? "Saving..." : "Save Draft"}
+						</button>
+						<button
+							type="submit"
+							disabled={loading || form.rawReport.trim().length === 0}
+							className="flex-1 font-mono text-xs uppercase tracking-widest px-4 py-2.5 bg-amber text-base border border-amber disabled:opacity-50 disabled:cursor-not-allowed"
+							style={{ color: "var(--bg)", borderRadius: 0 }}
+						>
+							{loading ? "Processing..." : "Run Analysis"}
+						</button>
+					</div>
 				</form>
 			</div>
 
@@ -339,6 +559,14 @@ export function AutopsyPanel({ caseId, existingReport }: AutopsyPanelProps) {
 									{result.confidence}%
 								</span>
 							</div>
+							{result.confidence < 30 && (
+								<p className="text-xs text-muted mt-1 leading-relaxed">
+									Low confidence. The model judged the input too brief or
+									informal to extract strong clinical signal. Paste a fuller
+									autopsy narrative with cause, manner, injuries, and
+									toxicology findings for a higher-quality analysis.
+								</p>
+							)}
 
 							{result.analysisNotes && (
 								<>

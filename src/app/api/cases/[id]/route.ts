@@ -1,6 +1,7 @@
 export const dynamic = "force-dynamic";
 import { type NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
+import { randomUUID } from "crypto";
 
 export async function GET(
 	_request: NextRequest,
@@ -77,12 +78,12 @@ export async function PATCH(
 			"tags",
 		];
 		const setClauses: string[] = [];
-		const updateParams: Record<string, unknown> = { $id: id };
+		const updateParams: Record<string, unknown> = { id: id };
 
 		for (const field of allowed) {
 			if (field in body) {
 				setClauses.push(`${field} = $${field}`);
-				updateParams[`$${field}`] = body[field];
+				updateParams[field] = body[field];
 			}
 		}
 		if (setClauses.length === 0)
@@ -91,6 +92,26 @@ export async function PATCH(
 		db.prepare(`UPDATE cases SET ${setClauses.join(", ")} WHERE id = $id`).run(
 			updateParams,
 		);
+
+		// Audit log: write STATUS_CHANGED when status actually changes.
+		const prev = existing as { status?: string };
+		if (
+			"status" in body &&
+			typeof body.status === "string" &&
+			body.status !== prev.status
+		) {
+			db.prepare(
+				"INSERT INTO case_activities (id,caseId,type,description,createdAt,agent) VALUES ($id,$caseId,$type,$description,$createdAt,$agent)",
+			).run({
+				id: `act-${randomUUID().slice(0, 8)}`,
+				caseId: id,
+				type: "STATUS_CHANGED",
+				description: `Case status changed from ${prev.status ?? "?"} to ${body.status}.`,
+				createdAt: new Date().toISOString(),
+				agent: "Investigator",
+			});
+		}
+
 		return NextResponse.json(
 			db.prepare("SELECT * FROM cases WHERE id = ?").get(id),
 		);
